@@ -1,0 +1,9 @@
+# Network Programming HW3 - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Password hashing
+bcrypt>=4.0.0
+
+# GUI framework for clients
+pygame>=2.5.0
+

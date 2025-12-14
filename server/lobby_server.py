@@ -12,15 +12,23 @@ import sys
 import logging
 import os
 import time
-import subprocess 
+import subprocess
+
+# Add project root to path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # Import our protocol library
 try:
     from common import config
     from common.protocol import send_msg, recv_msg
-except ImportError:
-    print("Error: Could not import protocol.py.")
-    print("Ensure 'common/protocol.py' exists and is in your Python path.")
+    from server.handlers.developer_handler import handle_upload_game, handle_update_game, handle_remove_game, check_developer
+    from server.handlers.game_handler import handle_list_games, handle_search_games, handle_get_game_info, handle_download_game
+except ImportError as e:
+    print(f"Error: Could not import required modules: {e}")
+    print("Ensure all modules exist and are in your Python path.")
     sys.exit(1)
 
 # Server Configuration
@@ -107,6 +115,7 @@ def handle_register(client_sock: socket.socket, data: dict) -> dict:
     """Handles 'register' action."""
     username = data.get('user')
     password = data.get('pass')
+    is_developer = data.get('is_developer', False) # Check for the new flag
     
     if not username or not password:
         return {"status": "error", "reason": "missing_fields"}
@@ -117,7 +126,8 @@ def handle_register(client_sock: socket.socket, data: dict) -> dict:
         "action": "create",
         "data": {
             "username": username,
-            "password": password
+            "password": password,
+            "is_developer": is_developer
         }
     }
     db_response = forward_to_db(db_request)
@@ -177,8 +187,13 @@ def handle_login(client_sock: socket.socket, addr: tuple, data: dict) -> str | N
             # Log a warning, but don't fail the login
             logging.warning(f"Failed to update 'online' status in DB for {username}.")
 
-        # Send success to client
-        send_to_client(client_sock, {"status": "ok", "reason": "login_successful"})
+        # Send success to client, including the user data from the DB response
+        response_to_client = {
+            "status": "ok",
+            "reason": "login_successful",
+            "user": db_response.get("user") # Forward the user object
+        }
+        send_to_client(client_sock, response_to_client)
         
         return username
     else:
@@ -504,12 +519,16 @@ def handle_start_game(client_sock: socket.socket, username: str):
     try:
         game_port = find_free_port(config.GAME_SERVER_START_PORT)
         
+        # Get the path to game_server.py (in server/ directory)
+        server_dir = os.path.dirname(os.path.abspath(__file__))
+        game_server_path = os.path.join(server_dir, "game_server.py")
+        
         command = [
-            "python3", "game_server.py", 
+            "python3", game_server_path, 
             "--port", str(game_port),
             "--p1", player1_name,
             "--p2", player2_name,
-            "--room_id", str(room_id) # Add room_id to the command
+            "--room_id", str(room_id)
         ]
         subprocess.Popen(command)
         
@@ -718,6 +737,53 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                     else:
                         send_to_client(client_sock, {"status": "error", "reason": "failed_to_fetch_gamelogs"})
 
+                # Developer actions
+                elif action == 'upload_game':
+                    response = handle_upload_game(client_sock, username, data, DB_HOST, DB_PORT)
+                    if response.get("status") == "ok":
+                        send_to_client(client_sock, {"status": "ok", "reason": "game_uploaded", **response})
+                    else:
+                        send_to_client(client_sock, response)
+                
+                elif action == 'update_game':
+                    response = handle_update_game(client_sock, username, data, DB_HOST, DB_PORT)
+                    if response.get("status") == "ok":
+                        send_to_client(client_sock, {"status": "ok", "reason": "game_updated", **response})
+                    else:
+                        send_to_client(client_sock, response)
+                
+                elif action == 'remove_game':
+                    response = handle_remove_game(client_sock, username, data, DB_HOST, DB_PORT)
+                    if response.get("status") == "ok":
+                        send_to_client(client_sock, {"status": "ok", "reason": "game_removed"})
+                    else:
+                        send_to_client(client_sock, response)
+                
+                elif action == 'list_my_games':
+                    # Get games by author
+                    db_request = {
+                        "collection": "Game",
+                        "action": "list_by_author",
+                        "data": {"author": username}
+                    }
+                    db_response = forward_to_db(db_request)
+                    if db_response and db_response.get("status") == "ok":
+                        send_to_client(client_sock, {"status": "ok", "games": db_response.get("games", [])})
+                    else:
+                        send_to_client(client_sock, {"status": "error", "reason": "failed_to_list_games"})
+
+                # Game browsing actions (available to all)
+                elif action == 'list_games':
+                    handle_list_games(client_sock, DB_HOST, DB_PORT)
+                
+                elif action == 'search_games':
+                    handle_search_games(client_sock, data, DB_HOST, DB_PORT)
+                
+                elif action == 'get_game_info':
+                    handle_get_game_info(client_sock, data, DB_HOST, DB_PORT)
+                
+                elif action == 'download_game':
+                    handle_download_game(client_sock, data, DB_HOST, DB_PORT)
 
                 else:
                     send_to_client(client_sock, {"status": "error", "reason": f"unknown_action: {action}"})

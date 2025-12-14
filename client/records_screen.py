@@ -1,7 +1,17 @@
 import pygame
+import sys
+import os
+
+# Add project root to path BEFORE any other imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Now import project modules
 from common import config
-from shared import send_to_lobby_queue
-from client_gui import CONFIG, Button
+from client.shared import send_to_lobby_queue
+from client.client_gui import CONFIG, Button
 
 records_state = {
     "view": "user",  # "user" or "global"

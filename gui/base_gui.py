@@ -91,31 +91,55 @@ BASE_CONFIG = {
 # --- UI Helper Classes ---
 
 class TextInput:
-    def __init__(self, x, y, w, h, font, text=''):
+    def __init__(self, x, y, w, h, font, text='', password=False, multiline=False):
         self.rect = pygame.Rect(x, y, w, h)
         self.color = BASE_CONFIG["COLORS"]["INPUT_BOX"]
         self.text = text
         self.font = font
         self.active = False
-        self.text_surface = self.font.render(text, True, self.color)
-    
+        self.password = password
+        self.multiline = multiline
+        self.text_surfaces = [] # Store multiple surfaces for multiline
+        self._update_surface()
+
     def handle_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN:
             self.active = self.rect.collidepoint(event.pos)
             self.color = BASE_CONFIG["COLORS"]["INPUT_ACTIVE"] if self.active else BASE_CONFIG["COLORS"]["INPUT_BOX"]
         if event.type == pygame.KEYDOWN and self.active:
             if event.key == pygame.K_RETURN:
-                return "enter"
+                if self.multiline:
+                    self.text += '\n'
+                else:
+                    return "enter" # Only return "enter" for single-line inputs
             elif event.key == pygame.K_BACKSPACE:
                 self.text = self.text[:-1]
             else:
                 self.text += event.unicode
-            self.text_surface = self.font.render(self.text, True, BASE_CONFIG["COLORS"]["INPUT_TEXT"])
-    
+            self._update_surface()
+
+    def _update_surface(self):
+        """Renders the text surfaces, masking and wrapping if necessary."""
+        self.text_surfaces = []
+        if self.multiline:
+            lines = self.text.split('\n')
+        else:
+            lines = [self.text] # Treat as a single line
+        
+        for line in lines:
+            display_text = line
+            if self.password:
+                display_text = '*' * len(line)
+            self.text_surfaces.append(self.font.render(display_text, True, BASE_CONFIG["COLORS"]["INPUT_TEXT"]))
+
     def draw(self, screen):
         pygame.draw.rect(screen, self.color, self.rect, 0, border_radius=BASE_CONFIG["STYLE"]["CORNER_RADIUS"])
         pygame.draw.rect(screen, BASE_CONFIG["COLORS"]["TEXT"], self.rect, 1, border_radius=BASE_CONFIG["STYLE"]["CORNER_RADIUS"]) # Thin border
-        screen.blit(self.text_surface, (self.rect.x + 5, self.rect.y + 5))
+        
+        y_offset = 0
+        for text_surface in self.text_surfaces:
+            screen.blit(text_surface, (self.rect.x + 5, self.rect.y + 5 + y_offset))
+            y_offset += self.font.get_height()
 
 class Button:
     def __init__(self, x, y, w, h, font, text=''):
@@ -267,7 +291,7 @@ class BaseGUI:
         input_width = 300
         self.ui_elements = {
             "user_input": TextInput(form_center_x - input_width // 2, 220, input_width, 32, self.fonts["SMALL"]),
-            "pass_input": TextInput(form_center_x - input_width // 2, 280, input_width, 32, self.fonts["SMALL"]),
+            "pass_input": TextInput(form_center_x - input_width // 2, 280, input_width, 32, self.fonts["SMALL"], password=True),
             "login_btn": Button(form_center_x - 150, 340, 140, 40, self.fonts["SMALL"], "Login"),
             "reg_btn": Button(form_center_x + 10, 340, 140, 40, self.fonts["SMALL"], "Register"),
             "login_focusable_elements": ["user_input", "pass_input", "login_btn", "reg_btn"],
@@ -305,9 +329,7 @@ class BaseGUI:
                 # Handle back button event globally if not on login screen
                 if current_state not in ["LOGIN", "CONNECTING"]:
                     if self.ui_elements["back_btn"].handle_event(event):
-                        with self.state_lock:
-                            self.client_state = "LOGIN"
-                            # Optionally, disconnect from server or logout user here
+                        self.handle_back_button(current_state)
                         continue # Skip other event handling for this event
 
                 # Delegate event handling based on state
@@ -513,6 +535,17 @@ class BaseGUI:
         if self.lobby_socket:
             self.lobby_socket.close()
         pygame.quit()
+
+    def handle_back_button(self, current_state):
+        """Default back button behavior: return to login screen and log out."""
+        if self.username: # Only send logout if logged in
+            from client.shared import send_to_lobby_queue
+            send_to_lobby_queue({"action": "logout"})
+            
+        with self.state_lock:
+            self.client_state = "LOGIN"
+            self.username = None # Clear username on logout
+            self.error_message = None # Clear any error messages
 
     # --- Methods to be overridden by subclasses ---
 

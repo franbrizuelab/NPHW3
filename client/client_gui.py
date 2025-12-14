@@ -16,21 +16,19 @@ import logging
 import queue
 import select
 import random
-import records_screen
-from shared import g_lobby_send_queue, send_to_lobby_queue
 
-# Add project root to path
-try:
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
-    from common import config
-    from common import protocol
-    from common.game_rules import PIECE_SHAPES
-except ImportError:
-    print("Error: Could not import common/protocol.py or common/config.py.")
-    sys.exit(1)
+# Add project root to path BEFORE any other imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Now import project modules
+from common import config
+from common import protocol
+from common.game_rules import PIECE_SHAPES
+import client.records_screen as records_screen
+from client.shared import g_lobby_send_queue, send_to_lobby_queue
 
 # Logging
 # logging.basicConfig(level=logging.INFO, format='[CLIENT_GUI] %(asctime)s - %(message)s')

@@ -1,9 +1,28 @@
-test_db_client.py
-common/config.py
-storage/users.json
-storage/gamelogs.json
-test_pieces.py
-rules.pdf
-rules_en.md
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Python
 __pycache__/
-common/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Database
+storage/database.db
+storage/*.json
+
+# Game files
+storage/games/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

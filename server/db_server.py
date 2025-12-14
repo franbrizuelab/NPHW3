@@ -14,6 +14,12 @@ import sys
 import logging
 import sqlite3
 
+# Add project root to path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 # Import our new protocol functions
 try:
     from common import config
@@ -178,6 +184,117 @@ def process_request(request_data: dict) -> dict:
 
             else:
                 return {"status": "error", "reason": f"Unknown action '{action}' for GameLog"}
+
+        # === Game Collection ===
+        elif collection == "Game":
+            if action == "create":
+                name = data.get('name')
+                author = data.get('author')
+                description = data.get('description')
+                version = data.get('version')
+                
+                if not name or not author:
+                    return {"status": "error", "reason": "missing_fields"}
+                
+                game_id = db_ops.create_game(name, author, description, version)
+                if game_id:
+                    logging.info(f"Created game: {name} (id: {game_id})")
+                    return {"status": "ok", "game_id": game_id}
+                else:
+                    return {"status": "error", "reason": "failed_to_create_game"}
+            
+            elif action == "query":
+                game_id = data.get('game_id')
+                if game_id:
+                    game = db_ops.get_game(game_id)
+                    if game:
+                        return {"status": "ok", "game": game}
+                    else:
+                        return {"status": "error", "reason": "game_not_found"}
+                else:
+                    return {"status": "error", "reason": "missing_game_id"}
+            
+            elif action == "list":
+                games = db_ops.list_all_games()
+                return {"status": "ok", "games": games}
+            
+            elif action == "list_by_author":
+                author = data.get('author')
+                if not author:
+                    return {"status": "error", "reason": "missing_author"}
+                games = db_ops.get_games_by_author(author)
+                return {"status": "ok", "games": games}
+            
+            elif action == "search":
+                query = data.get('query', '')
+                if not query:
+                    return {"status": "error", "reason": "missing_query"}
+                games = db_ops.search_games(query)
+                return {"status": "ok", "games": games}
+            
+            elif action == "update":
+                game_id = data.get('game_id')
+                if not game_id:
+                    return {"status": "error", "reason": "missing_game_id"}
+                
+                name = data.get('name')
+                description = data.get('description')
+                current_version = data.get('current_version')
+                
+                if db_ops.update_game(game_id, name, description, current_version):
+                    return {"status": "ok"}
+                else:
+                    return {"status": "error", "reason": "failed_to_update_game"}
+            
+            elif action == "delete":
+                game_id = data.get('game_id')
+                if not game_id:
+                    return {"status": "error", "reason": "missing_game_id"}
+                
+                if db_ops.delete_game(game_id):
+                    return {"status": "ok"}
+                else:
+                    return {"status": "error", "reason": "failed_to_delete_game"}
+            
+            else:
+                return {"status": "error", "reason": f"Unknown action '{action}' for Game"}
+
+        # === GameVersion Collection ===
+        elif collection == "GameVersion":
+            if action == "create":
+                game_id = data.get('game_id')
+                version = data.get('version')
+                file_path = data.get('file_path')
+                file_hash = data.get('file_hash')
+                
+                if not game_id or not version or not file_path:
+                    return {"status": "error", "reason": "missing_fields"}
+                
+                version_id = db_ops.create_game_version(game_id, version, file_path, file_hash)
+                if version_id:
+                    return {"status": "ok", "version_id": version_id}
+                else:
+                    return {"status": "error", "reason": "failed_to_create_version"}
+            
+            elif action == "query":
+                game_id = data.get('game_id')
+                version = data.get('version')
+                
+                if not game_id:
+                    return {"status": "error", "reason": "missing_game_id"}
+                
+                if version:
+                    version_info = db_ops.get_game_version(game_id, version)
+                else:
+                    version_info = db_ops.get_latest_version(game_id)
+                
+                if version_info:
+                    return {"status": "ok", "version": version_info}
+                else:
+                    return {"status": "error", "reason": "version_not_found"}
+            
+            else:
+                return {"status": "error", "reason": f"Unknown action '{action}' for GameVersion"}
 
         else:
             return {"status": "error", "reason": f"Unknown collection '{collection}'"}
