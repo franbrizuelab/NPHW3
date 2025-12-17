@@ -19,19 +19,44 @@ import random
 import queue
 import logging
 import argparse
+import select
 from datetime import datetime
 
 # Add project root to path to access common modules
+# This works whether the file is in developer/games/, storage/games/, or player/downloads/{username}/
 current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(current_dir))  # Go up from developer/games/ to project root
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+
+# Search upward from current directory to find project root (directory containing "common")
+project_root = None
+search_dir = current_dir
+max_levels = 10  # Go up at most 10 levels
+for _ in range(max_levels):
+    common_path = os.path.join(search_dir, "common")
+    if os.path.exists(common_path) and os.path.isdir(common_path):
+        project_root = search_dir
+        break
+    parent = os.path.dirname(search_dir)
+    if parent == search_dir:  # Reached filesystem root
+        break
+    search_dir = parent
+
+if project_root:
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    # logging not imported yet, use print for debugging
+    # logging.debug(f"Found project root: {project_root}")
+else:
+    print(f"ERROR: Could not find project root. Searched from: {current_dir}")
 
 try:
     from common import config
     from common import protocol
-except ImportError:
-    print("Error: Could not import common modules (protocol, config).")
+except ImportError as e:
+    print(f"Error: Could not import common modules (protocol, config).")
+    print(f"Import error: {e}")
+    print(f"Current directory: {os.path.dirname(os.path.abspath(__file__))}")
+    print(f"Project root: {project_root}")
+    print(f"Python path: {sys.path[:3]}")
     print("Ensure this file is in the correct location relative to the 'common' folder.")
     sys.exit(1)
 
@@ -567,95 +592,374 @@ def find_free_port(start_port: int) -> int:
             port += 1
     raise RuntimeError("Could not find a free port")
 
-def main():
-    parser = argparse.ArgumentParser(description="Tetris Game Server")
-    parser.add_argument(
-        '--port', 
-        type=int, 
-        default=config.GAME_SERVER_START_PORT, 
-        help='Port to listen on'
-    )
-    parser.add_argument('--p1', type=str, required=True, help='Username of Player 1')
-    parser.add_argument('--p2', type=str, required=True, help='Username of Player 2')
-    parser.add_argument('--room_id', type=int, required=True, help='ID of the room')
-    args = parser.parse_args()
-    
-    PORT = args.port
-    P1_USERNAME = args.p1
-    P2_USERNAME = args.p2
-    ROOM_ID = args.room_id
-    
-    HOST = '0.0.0.0'
-    game_seed = random.randint(0, 1_000_000)
+# Old main() function removed - server mode is now handled in if __name__ == "__main__" block below
 
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    try:
-        server_socket.bind((HOST, PORT))
-        server_socket.listen(2)
-        logging.info(f"Tetris Game Server listening on {HOST}:{PORT}...")
-    except Exception as e:
-        logging.critical(f"Failed to bind socket: {e}")
+# ============================================================================
+# GAME CLIENT (For players to launch from downloaded file)
+# ============================================================================
+
+def _notify_lobby_leave_room(room_id: int):
+    """Notify lobby server that player is leaving the room."""
+    if not room_id:
         return
-
-    clients = []
-    client_threads = []
-    input_queue = queue.Queue()
-
     try:
-        # 1. Wait for exactly two clients
-        while len(clients) < 2:
-            logging.info(f"Waiting for {2 - len(clients)} more player(s)...")
-            client_sock, addr = server_socket.accept()
-            player_id = len(clients)
-            
-            clients.append(client_sock)
-            logging.info(f"Player {player_id + 1} connected from {addr}.")
-            
-            role = "P1" if player_id == 0 else "P2"
-            welcome_msg = {
-                "type": "WELCOME",
-                "role": role,
-                "seed": game_seed  # Send the seed here
-            }
-            try:
-                protocol.send_msg(client_sock, json.dumps(welcome_msg).encode('utf-8'))
-            except Exception as e:
-                logging.error(f"Failed to send WELCOME message to {role}: {e}")
-                # This client is bad, remove them and wait for a new one
-                clients.pop()
-                client_sock.close()
-                continue
-            
-            # Start a thread to handle this client's inputs
-            thread = threading.Thread(
-                target=handle_client,
-                args=(client_sock, player_id, input_queue),
-                daemon=True
-            )
-            client_threads.append(thread)
-            thread.start()
-
-        logging.info("Two players connected. Starting game...")
-        
-        # 2. Create the game instances
-        # Use the same seed for both players for identical piece sequences
-        game_p1 = TetrisGame(game_seed)
-        game_p2 = TetrisGame(game_seed)
-        
-        # 3. Run the main game loop
-        game_loop(clients, input_queue, game_p1, game_p2, P1_USERNAME, P2_USERNAME, ROOM_ID)
-
-    except KeyboardInterrupt:
-        logging.info("Shutting down game server.")
+        from common import config
+        lobby_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lobby_sock.settimeout(2.0)
+        lobby_sock.connect((config.LOBBY_HOST, config.LOBBY_PORT))
+        request = {
+            "action": "leave_room",
+            "data": {"room_id": room_id}
+        }
+        request_bytes = json.dumps(request).encode('utf-8')
+        protocol.send_msg(lobby_sock, request_bytes)
+        # Wait for response
+        response_bytes = protocol.recv_msg(lobby_sock)
+        lobby_sock.close()
+        logging.info(f"Notified lobby server of room leave for room {room_id}")
     except Exception as e:
-        logging.error(f"Critical error in main: {e}", exc_info=True)
-    finally:
-        for sock in clients:
-            sock.close()
-        server_socket.close()
-        logging.info("Tetris game server shut down.")
+        logging.warning(f"Failed to notify lobby server of room leave: {e}")
+
+def run_game_client(game_host: str, game_port: int, room_id: int = None):
+    """
+    Runs the game client GUI.
+    This function is called by player_client.py when GAME_START is received.
+    It reuses the GUI code from client/client_gui.py.
+    """
+    # Add project root to path to access client modules
+    # Use the same project_root that was found at module load time
+    # If not found, search for it
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = None
+    
+    # Try to find project root by looking for common/ directory
+    search_dir = current_dir
+    for _ in range(5):  # Go up at most 5 levels
+        if os.path.exists(os.path.join(search_dir, "common")):
+            project_root = search_dir
+            break
+        search_dir = os.path.dirname(search_dir)
+    
+    if project_root and project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    
+    if not project_root:
+        logging.error("Could not find project root (looking for 'common' directory)")
+        return
+    
+    try:
+        # Import GUI functions from client/client_gui.py
+        import importlib.util
+        client_gui_path = os.path.join(project_root, "client", "client_gui.py")
+        
+        if not os.path.exists(client_gui_path):
+            # Fallback: try to import directly
+            from client import client_gui
+            client_gui_module = client_gui
+        else:
+            spec = importlib.util.spec_from_file_location("client_gui", client_gui_path)
+            client_gui_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(client_gui_module)
+        
+        # Use the game client GUI from client_gui.py
+        # We'll create a simplified version that just runs the game
+        import pygame
+        
+        # Initialize pygame
+        pygame.init()
+        pygame.font.init()
+        
+        # Set up screen
+        screen = pygame.display.set_mode((900, 700))
+        pygame.display.set_caption("Tetris Game")
+        clock = pygame.time.Clock()
+        
+        # Connect to game server
+        game_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        # Retry connection
+        max_retries = 5
+        retry_delay = 0.5
+        connected = False
+        for attempt in range(max_retries):
+            try:
+                game_sock.settimeout(2.0)
+                game_sock.connect((game_host, game_port))
+                game_sock.settimeout(None)
+                connected = True
+                logging.info(f"Connected to game server at {game_host}:{game_port}")
+                break
+            except (socket.error, ConnectionRefusedError, OSError) as e:
+                if attempt < max_retries - 1:
+                    logging.info(f"Connection attempt {attempt + 1} failed, retrying...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5
+                else:
+                    logging.error(f"Failed to connect to game server: {e}")
+                    pygame.quit()
+                    return
+        
+        if not connected:
+            return
+        
+        # Receive WELCOME message
+        welcome_bytes = protocol.recv_msg(game_sock)
+        if not welcome_bytes:
+            logging.error("Game server disconnected")
+            game_sock.close()
+            pygame.quit()
+            return
+        
+        welcome_msg = json.loads(welcome_bytes.decode('utf-8'))
+        my_role = welcome_msg.get("role")
+        logging.info(f"Received WELCOME, my role: {my_role}")
+        
+        # Set up game state
+        last_game_state = None
+        game_over_results = None
+        game_send_queue = queue.Queue()
+        running = True
+        user_acknowledged_game_over = False
+        game_over_start_time = None  # Track when game over screen started
+        my_role = None  # Will be set from WELCOME message
+        
+        # Load fonts (reuse from client_gui)
+        CONFIG = client_gui_module.CONFIG
+        font_path = CONFIG["FONTS"]["DEFAULT_FONT"]
+        sizes = CONFIG["FONTS"]["SIZES"]
+        fonts = {}
+        try:
+            fonts["TINY"] = pygame.font.Font(font_path, sizes["TINY"])
+            fonts["SMALL"] = pygame.font.Font(font_path, sizes["SMALL"])
+            fonts["MEDIUM"] = pygame.font.Font(font_path, sizes["MEDIUM"])
+            fonts["LARGE"] = pygame.font.Font(font_path, sizes["LARGE"])
+            fonts["GAME_OVER"] = pygame.font.Font(font_path, sizes["GAME_OVER"])
+        except:
+            fonts["TINY"] = pygame.font.Font(None, sizes["TINY"])
+            fonts["SMALL"] = pygame.font.Font(None, sizes["SMALL"])
+            fonts["MEDIUM"] = pygame.font.Font(None, sizes["MEDIUM"])
+            fonts["LARGE"] = pygame.font.Font(None, sizes["LARGE"])
+            fonts["GAME_OVER"] = pygame.font.Font(None, sizes["GAME_OVER"])
+        
+        # UI elements
+        ui_elements = {
+            "back_to_lobby_btn": client_gui_module.Button(350, 450, 200, 50, fonts["SMALL"], "Back to Lobby")
+        }
+        
+        # Game network thread
+        def game_network_thread():
+            nonlocal last_game_state, game_over_results, running, my_role
+            try:
+                while running:
+                    readable, _, exceptional = select.select([game_sock], [], [game_sock], 0.1)
+                    
+                    if exceptional:
+                        break
+                    
+                    if game_sock in readable:
+                        data_bytes = protocol.recv_msg(game_sock)
+                        if data_bytes is None:
+                            break
+                        
+                        snapshot = json.loads(data_bytes.decode('utf-8'))
+                        msg_type = snapshot.get("type")
+                        
+                        if msg_type == "SNAPSHOT":
+                            last_game_state = snapshot
+                        elif msg_type == "GAME_OVER":
+                            game_over_results = snapshot
+                            # Don't break - keep thread running to handle cleanup
+                    
+                    # Send messages
+                    try:
+                        while not game_send_queue.empty():
+                            request = game_send_queue.get_nowait()
+                            json_bytes = json.dumps(request).encode('utf-8')
+                            protocol.send_msg(game_sock, json_bytes)
+                    except queue.Empty:
+                        pass
+            except Exception as e:
+                logging.error(f"Error in game network thread: {e}")
+            finally:
+                if game_sock:
+                    game_sock.close()
+        
+        # Start network thread
+        network_thread = threading.Thread(target=game_network_thread, daemon=True)
+        network_thread.start()
+        
+        # Main game loop
+        while running:
+            # Check if game over and 3 seconds have passed
+            if game_over_results:
+                if game_over_start_time is None:
+                    game_over_start_time = time.time()
+                elif time.time() - game_over_start_time >= 3.0:
+                    # 3 seconds have passed, allow exit
+                    user_acknowledged_game_over = True
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if game_over_results:
+                        # After 3 seconds, ESC or button click can exit
+                        if user_acknowledged_game_over and event.key == pygame.K_ESCAPE:
+                            running = False
+                    else:
+                        if event.key == pygame.K_LEFT:
+                            game_send_queue.put({"type": "INPUT", "action": "MOVE_LEFT"})
+                        elif event.key == pygame.K_RIGHT:
+                            game_send_queue.put({"type": "INPUT", "action": "MOVE_RIGHT"})
+                        elif event.key == pygame.K_DOWN:
+                            game_send_queue.put({"type": "INPUT", "action": "SOFT_DROP"})
+                        elif event.key == pygame.K_UP:
+                            game_send_queue.put({"type": "INPUT", "action": "ROTATE"})
+                        elif event.key == pygame.K_SPACE:
+                            game_send_queue.put({"type": "INPUT", "action": "HARD_DROP"})
+                        elif event.key == pygame.K_ESCAPE:
+                            # Send FORFEIT and notify lobby server
+                            game_send_queue.put({"type": "FORFEIT"})
+                            # Notify lobby server that player is leaving
+                            _notify_lobby_leave_room(room_id)
+                            running = False
+                
+                if game_over_results and user_acknowledged_game_over:
+                    if ui_elements["back_to_lobby_btn"].handle_event(event):
+                        running = False
+            
+            # Draw
+            screen.fill(CONFIG["COLORS"]["BACKGROUND"])
+            
+            if game_over_results:
+                # Draw game over screen
+                if last_game_state:
+                    # Draw the final game state first
+                    client_gui_module.draw_game_state(screen, fonts, last_game_state, ui_elements)
+                # Then draw the game over overlay
+                my_state = last_game_state.get("p1_state", {}) if my_role == "P1" else last_game_state.get("p2_state", {}) if last_game_state else {}
+                opponent_state = last_game_state.get("p2_state", {}) if my_role == "P1" else last_game_state.get("p1_state", {}) if last_game_state else {}
+                client_gui_module.draw_game_over_screen(screen, fonts, ui_elements, game_over_results, my_state, opponent_state)
+                
+                # Show countdown if less than 3 seconds have passed
+                if game_over_start_time and not user_acknowledged_game_over:
+                    elapsed = time.time() - game_over_start_time
+                    remaining = max(0, 3.0 - elapsed)
+                    countdown_text = f"Returning to lobby in {int(remaining) + 1}..."
+                    client_gui_module.draw_text(screen, countdown_text, 350, 550, fonts["SMALL"], CONFIG["COLORS"]["TEXT"])
+            elif last_game_state:
+                # Use the draw_game_state function from client_gui
+                client_gui_module.draw_game_state(screen, fonts, last_game_state, ui_elements)
+            else:
+                client_gui_module.draw_text(screen, "Connecting...", 350, 300, fonts["LARGE"], CONFIG["COLORS"]["TEXT"])
+            
+            pygame.display.flip()
+            clock.tick(CONFIG["TIMING"]["FPS"])
+        
+        # Wait for network thread
+        network_thread.join(timeout=1.0)
+        pygame.quit()
+        
+        # Notify lobby server if game ended normally (not forfeit)
+        # The game server already notifies on game_over, but we should also leave the room
+        if room_id:
+            _notify_lobby_leave_room(room_id)
+        
+    except Exception as e:
+        logging.error(f"Error running game client: {e}", exc_info=True)
+        try:
+            pygame.quit()
+        except:
+            pass
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Tetris Game (Server or Client)")
+    parser.add_argument('--mode', choices=['server', 'client'], default='server',
+                       help='Run as server (default) or client')
+    parser.add_argument('--host', type=str, help='Game server host (client mode)')
+    parser.add_argument('--port', type=int, help='Game server port (client mode)')
+    parser.add_argument('--room_id', type=int, help='Room ID (client mode)')
+    parser.add_argument('--p1', type=str, help='Username of Player 1 (server mode)')
+    parser.add_argument('--p2', type=str, help='Username of Player 2 (server mode)')
+    
+    args = parser.parse_args()
+    
+    if args.mode == 'client':
+        if not args.host or not args.port:
+            print("Error: --host and --port required for client mode")
+            sys.exit(1)
+        run_game_client(args.host, args.port, args.room_id)
+    else:
+        # Server mode (original behavior)
+        if not args.p1 or not args.p2 or not args.room_id:
+            print("Error: --p1, --p2, and --room_id required for server mode")
+            sys.exit(1)
+        # Modify main() to accept args
+        PORT = args.port if args.port else config.GAME_SERVER_START_PORT
+        P1_USERNAME = args.p1
+        P2_USERNAME = args.p2
+        ROOM_ID = args.room_id
+        
+        HOST = '0.0.0.0'
+        game_seed = random.randint(0, 1_000_000)
+        
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            server_socket.bind((HOST, PORT))
+            server_socket.listen(2)
+            logging.info(f"Tetris Game Server listening on {HOST}:{PORT}...")
+        except Exception as e:
+            logging.critical(f"Failed to bind socket: {e}")
+            sys.exit(1)
+        
+        clients = []
+        client_threads = []
+        input_queue = queue.Queue()
+        
+        try:
+            while len(clients) < 2:
+                logging.info(f"Waiting for {2 - len(clients)} more player(s)...")
+                client_sock, addr = server_socket.accept()
+                player_id = len(clients)
+                
+                clients.append(client_sock)
+                logging.info(f"Player {player_id + 1} connected from {addr}.")
+                
+                role = "P1" if player_id == 0 else "P2"
+                welcome_msg = {
+                    "type": "WELCOME",
+                    "role": role,
+                    "seed": game_seed
+                }
+                try:
+                    protocol.send_msg(client_sock, json.dumps(welcome_msg).encode('utf-8'))
+                except Exception as e:
+                    logging.error(f"Failed to send WELCOME message to {role}: {e}")
+                    clients.pop()
+                    client_sock.close()
+                    continue
+                
+                thread = threading.Thread(
+                    target=handle_client,
+                    args=(client_sock, player_id, input_queue),
+                    daemon=True
+                )
+                client_threads.append(thread)
+                thread.start()
+            
+            logging.info("Two players connected. Starting game...")
+            game_p1 = TetrisGame(game_seed)
+            game_p2 = TetrisGame(game_seed)
+            game_loop(clients, input_queue, game_p1, game_p2, P1_USERNAME, P2_USERNAME, ROOM_ID)
+        
+        except KeyboardInterrupt:
+            logging.info("Shutting down game server.")
+        except Exception as e:
+            logging.error(f"Critical error: {e}", exc_info=True)
+        finally:
+            for sock in clients:
+                sock.close()
+            server_socket.close()
+            logging.info("Tetris game server shut down.")

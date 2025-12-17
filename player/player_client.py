@@ -62,6 +62,15 @@ class PlayerGUI(BaseGUI):
         self.pending_invite = None  # Stores invite data: {"from_user": str, "room_id": int, "game_name": str}
         self.invite_accept_btn = None
         self.invite_decline_btn = None
+        
+        # Game connection state
+        self.game_socket = None
+        self.game_send_queue = queue.Queue()
+        self.game_thread = None
+        self.my_role = None  # "P1" or "P2"
+        self.last_game_state = None
+        self.game_over_results = None
+        self.user_acknowledged_game_over = False
 
     def _lobby_network_thread(self):
         """Override base network thread to handle disconnections gracefully."""
@@ -159,6 +168,8 @@ class PlayerGUI(BaseGUI):
             self.draw_my_games_menu(screen)
         elif state == "ROOM_WAITING":
             self.draw_room_waiting_screen(screen)
+        elif state == "GAME":
+            self.draw_game_screen(screen)
         
         # Draw invitation popup if there's a pending invite (draws on top of everything)
         if self.pending_invite:
@@ -255,6 +266,20 @@ class PlayerGUI(BaseGUI):
                     if current_time - self.last_users_refresh > 5:  # Refresh every 5 seconds
                         send_to_lobby_queue({"action": "list_users"})
                         self.last_users_refresh = current_time
+        
+        elif state == "GAME":
+            # Handle game events (ESC to exit)
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                # Return to lobby
+                if self.game_socket:
+                    self.game_socket.close()
+                    self.game_socket = None
+                with self.state_lock:
+                    self.client_state = "LOBBY_MENU"
+                    self.current_room_id = None
+                    self.current_room_data = {}
+                send_to_lobby_queue({"action": "list_rooms"})
+                send_to_lobby_queue({"action": "list_users"})
         
         # Handle invitation popup (works in any state)
         if self.pending_invite:
@@ -400,17 +425,87 @@ class PlayerGUI(BaseGUI):
             logging.info(f"Received {len(self.game_rooms)} public rooms")
         
         elif msg.get("type") == "GAME_START":
-            # Game server started, transition to game
+            # Game server started, launch game client from downloaded file
             game_host = msg.get("host")
             game_port = msg.get("port")
             room_id = msg.get("room_id")
+            game_id = self.current_room_data.get("game_id") if self.current_room_data else None
             logging.info(f"Game started on {game_host}:{game_port} for room {room_id}")
-            # Update room status to playing (room stays open)
-            if self.current_room_data:
-                self.current_room_data["status"] = "playing"
-            # Note: The actual game connection will be handled by the game client
-            # For now, we just update the room status to show "playing"
-            # For now, stay in ROOM_WAITING screen but show game is running
+            
+            # Find the downloaded game file
+            game_file_path = None
+            if game_id and self.username:
+                # Find game name from all_games or my_games
+                game_name = None
+                for game in self.all_games + self.my_games:
+                    if game.get("id") == game_id:
+                        game_name = game.get("name", f"game_{game_id}")
+                        break
+                
+                if not game_name:
+                    game_name = f"game_{game_id}"
+                
+                # Look for the downloaded game file
+                user_download_dir = os.path.join("player", "downloads", self.username)
+                game_file_path = os.path.join(user_download_dir, f"{game_name}.py")
+                
+                # Also try with different case variations
+                if not os.path.exists(game_file_path):
+                    # Try to find any .py file in the download directory
+                    if os.path.exists(user_download_dir):
+                        for file in os.listdir(user_download_dir):
+                            if file.endswith('.py'):
+                                game_file_path = os.path.join(user_download_dir, file)
+                                logging.info(f"Found game file: {game_file_path}")
+                                break
+            
+            if not game_file_path or not os.path.exists(game_file_path):
+                logging.error(f"Game file not found: {game_file_path}")
+                with self.state_lock:
+                    self.client_state = "LOBBY_MENU"
+                    self.error_message = "Game file not found. Please download the game first."
+                return
+            
+            # Launch game client from downloaded file
+            def launch_game_client():
+                try:
+                    import subprocess
+                    # Launch the game client as a subprocess
+                    cmd = [
+                        "python3", game_file_path,
+                        "--mode", "client",
+                        "--host", game_host,
+                        "--port", str(game_port),
+                        "--room_id", str(room_id) if room_id else "0"
+                    ]
+                    logging.info(f"Launching game client: {' '.join(cmd)}")
+                    process = subprocess.Popen(cmd)
+                    
+                    # Wait for process to complete
+                    process.wait()
+                    
+                    # When game client exits, return to lobby
+                    logging.info("Game client exited, returning to lobby")
+                    with self.state_lock:
+                        self.client_state = "LOBBY_MENU"
+                        self.current_room_id = None
+                        self.current_room_data = {}
+                    send_to_lobby_queue({"action": "list_rooms"})
+                    send_to_lobby_queue({"action": "list_users"})
+                    
+                except Exception as e:
+                    logging.error(f"Failed to launch game client: {e}", exc_info=True)
+                    with self.state_lock:
+                        self.client_state = "LOBBY_MENU"
+                        self.error_message = f"Failed to launch game: {e}"
+            
+            # Launch in a separate thread so it doesn't block
+            threading.Thread(target=launch_game_client, daemon=True).start()
+            
+            # Update room status
+            with self.state_lock:
+                if self.current_room_data:
+                    self.current_room_data["status"] = "playing"
         
         else:
             super().handle_network_message(msg)
@@ -863,6 +958,105 @@ class PlayerGUI(BaseGUI):
         if self.invite_decline_btn:
             self.invite_decline_btn.draw(screen)
 
+    def _game_network_thread(self, sock):
+        """Handles game network communication."""
+        logging.info("Game network thread started.")
+        try:
+            while self.running:
+                readable, _, exceptional = select.select([sock], [], [sock], 0.1)
+                
+                if exceptional:
+                    logging.error("Game socket exception.")
+                    break
+                
+                # Receive messages
+                if sock in readable:
+                    data_bytes = protocol.recv_msg(sock)
+                    if data_bytes is None:
+                        logging.warning("Game server disconnected.")
+                        break
+                    
+                    snapshot = json.loads(data_bytes.decode('utf-8'))
+                    msg_type = snapshot.get("type")
+                    
+                    if msg_type == "SNAPSHOT":
+                        with self.state_lock:
+                            self.last_game_state = snapshot
+                    
+                    elif msg_type == "GAME_OVER":
+                        logging.info(f"Game over! Results: {snapshot}")
+                        with self.state_lock:
+                            self.game_over_results = snapshot
+                        break
+                
+                # Send messages from queue
+                try:
+                    while not self.game_send_queue.empty():
+                        request = self.game_send_queue.get_nowait()
+                        json_bytes = json.dumps(request).encode('utf-8')
+                        protocol.send_msg(sock, json_bytes)
+                except queue.Empty:
+                    pass
+                    
+        except (socket.error, json.JSONDecodeError, UnicodeDecodeError) as e:
+            logging.error(f"Error in game network thread: {e}")
+        finally:
+            logging.info("Game network thread exiting.")
+            if self.game_socket:
+                self.game_socket.close()
+                self.game_socket = None
+            with self.state_lock:
+                self.last_game_state = None
+                self.game_over_results = None
+                self.my_role = None
+                # Return to lobby
+                self.client_state = "LOBBY_MENU"
+                self.current_room_id = None
+                self.current_room_data = {}
+            # Notify lobby server
+            if self.game_over_results:
+                send_to_lobby_queue({
+                    "action": "game_over",
+                    "data": {"room_id": self.game_over_results.get("room_id")}
+                })
+            send_to_lobby_queue({"action": "list_rooms"})
+            send_to_lobby_queue({"action": "list_users"})
+    
+    def draw_game_screen(self, screen):
+        """Draws the game screen."""
+        if not self.last_game_state:
+            draw_text(screen, "Connecting to game...", 350, 300, self.fonts["MEDIUM"], (255, 255, 255))
+            return
+        
+        # Simple game display - show scores and status
+        if self.game_over_results:
+            # Game over screen
+            winner = self.game_over_results.get("winner_username", "Unknown")
+            reason = self.game_over_results.get("reason", "unknown")
+            draw_text(screen, "GAME OVER", 350, 200, self.fonts["LARGE"], (255, 0, 0))
+            draw_text(screen, f"Winner: {winner}", 350, 250, self.fonts["MEDIUM"], (255, 255, 255))
+            draw_text(screen, f"Reason: {reason}", 350, 280, self.fonts["SMALL"], (200, 200, 200))
+            draw_text(screen, "Press ESC to return to lobby", 300, 350, self.fonts["SMALL"], (150, 150, 150))
+        else:
+            # Game in progress
+            my_key = "p1_state" if self.my_role == "P1" else "p2_state"
+            opp_key = "p2_state" if self.my_role == "P1" else "p1_state"
+            
+            my_state = self.last_game_state.get(my_key, {})
+            opp_state = self.last_game_state.get(opp_key, {})
+            
+            draw_text(screen, f"Game Running - {self.my_role}", 50, 50, self.fonts["MEDIUM"], (255, 255, 255))
+            draw_text(screen, f"Your Score: {my_state.get('score', 0)}", 50, 100, self.fonts["SMALL"], (255, 255, 255))
+            draw_text(screen, f"Your Lines: {my_state.get('lines', 0)}", 50, 130, self.fonts["SMALL"], (255, 255, 255))
+            draw_text(screen, f"Opponent Score: {opp_state.get('score', 0)}", 50, 160, self.fonts["SMALL"], (200, 200, 200))
+            
+            remaining_time = self.last_game_state.get("remaining_time")
+            if remaining_time is not None:
+                draw_text(screen, f"Time: {remaining_time}s", 50, 190, self.fonts["SMALL"], (255, 255, 255))
+            
+            if my_state.get("game_over", False):
+                draw_text(screen, "GAME OVER - You Lost!", 50, 250, self.fonts["MEDIUM"], (255, 0, 0))
+    
     def _attempt_registration(self):
         # Players should not register as developers
         user = self.ui_elements["user_input"].text

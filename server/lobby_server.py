@@ -499,6 +499,11 @@ def handle_leave_room(username: str):
             # Notify remaining players FIRST, before deleting the room
             kick_msg = {"type": "KICKED_FROM_ROOM", "reason": "The host has left the room."}
             with g_session_lock:
+                # Reset host's status
+                host_session = g_client_sessions.get(username)
+                if host_session:
+                    host_session["status"] = "online"
+                # Reset remaining players' statuses
                 for player_name in remaining_players:
                     player_session = g_client_sessions.get(player_name)
                     if player_session:
@@ -511,6 +516,12 @@ def handle_leave_room(username: str):
             del g_rooms[room_id]
             logging.info(f"Room {room_id} closed.")
         else:
+            # Non-host player left - update their status and notify remaining players
+            with g_session_lock:
+                leaving_session = g_client_sessions.get(username)
+                if leaving_session:
+                    leaving_session["status"] = "online"  # Reset to online
+            
             # Notify remaining players of the updated room state
             with g_room_lock:
                 room_status = room.get("status", "idle")
@@ -654,18 +665,41 @@ def handle_start_game(client_sock: socket.socket, username: str):
             logging.info(f"Using default game server: {game_server_path}")
         
         command = [
-            "python3", game_server_path, 
+            "python3", game_server_path,
+            "--mode", "server",
             "--port", str(game_port),
             "--p1", player1_name,
             "--p2", player2_name,
             "--room_id", str(room_id)
         ]
-        subprocess.Popen(command)
+        process = subprocess.Popen(command)
         
         display_name = game_name or "Unknown Game"
         logging.info(f"Launched {display_name} (game_id: {game_id}) for {player1_name} and {player2_name} on port {game_port}")
         
-        time.sleep(0.5) # Sleep before telling clients
+        # Wait for game server to be ready (check if port is listening)
+        max_wait = 5  # Wait up to 5 seconds
+        waited = 0
+        server_ready = False
+        while waited < max_wait:
+            try:
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_sock.settimeout(0.5)
+                result = test_sock.connect_ex((config.LOBBY_HOST, game_port))
+                test_sock.close()
+                if result == 0:
+                    server_ready = True
+                    logging.info(f"Game server on port {game_port} is ready")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
+            waited += 0.2
+        
+        if not server_ready:
+            logging.warning(f"Game server on port {game_port} may not be ready, but proceeding anyway")
+        
+        time.sleep(0.3)  # Additional small delay for safety
 
         game_info_msg = {
             "type": "GAME_START",
