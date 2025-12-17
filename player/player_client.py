@@ -46,6 +46,11 @@ class PlayerGUI(BaseGUI):
         self.invite_buttons = {}  # Maps username to invite button
         self.room_toggle_buttons = {}  # Maps game_id to toggle button
         self.current_room_game_id = None  # Track which game we're creating room for
+        
+        # Room state
+        self.current_room_id = None  # Current room ID if in a room
+        self.current_room_data = {}  # Current room data (players, host, etc.)
+        self.room_join_buttons = {}  # Maps room_id to join button
 
     def _start_network_thread(self):
         super()._start_network_thread()
@@ -93,8 +98,8 @@ class PlayerGUI(BaseGUI):
             self.draw_store_menu(screen)
         elif state == "MY_GAMES_MENU":
             self.draw_my_games_menu(screen)
-        elif state == "ROOM_CREATE":
-            self.draw_room_create_screen(screen)
+        elif state == "ROOM_WAITING":
+            self.draw_room_waiting_screen(screen)
 
     def handle_custom_events(self, event, state):
         if state == "LOBBY_MENU":
@@ -127,12 +132,25 @@ class PlayerGUI(BaseGUI):
             # Handle create room button clicks
             for game_id, btn in self.create_room_buttons.items():
                 if btn.handle_event(event):
-                    # Request online users list and show room creation screen
-                    send_to_lobby_queue({"action": "list_users"})
+                    # Create room immediately and go to waiting screen
                     self.current_room_game_id = game_id
-                    with self.state_lock:
-                        self.client_state = "ROOM_CREATE"
-                    logging.info(f"Preparing to create room for game {game_id}")
+                    # Clear previous room state
+                    self.current_room_id = None
+                    self.current_room_data = {}
+                    self.online_users = []
+                    if hasattr(self, 'invite_buttons'):
+                        self.invite_buttons = {}
+                    send_to_lobby_queue({
+                        "action": "create_room",
+                        "data": {
+                            "game_id": game_id,
+                            "is_public": self.room_is_public,
+                            "name": f"{self.username}'s {self._get_game_name(game_id)} Room"
+                        }
+                    })
+                    # Request online users list for invitations (will be requested again when ROOM_UPDATE is received)
+                    send_to_lobby_queue({"action": "list_users"})
+                    logging.info(f"Creating room for game {game_id}, going to waiting screen")
             
             # Handle private/public toggle button clicks
             for game_id, toggle_btn in self.room_toggle_buttons.items():
@@ -141,29 +159,39 @@ class PlayerGUI(BaseGUI):
                     self.room_is_public = not self.room_is_public
                     logging.info(f"Room privacy toggled to: {'Public' if self.room_is_public else 'Private'}")
         
-        elif state == "ROOM_CREATE":
+        elif state == "ROOM_WAITING":
             # Handle invite button clicks
-            for username, invite_btn in self.invite_buttons.items():
-                if invite_btn.handle_event(event):
-                    # Send invitation (will implement later)
-                    logging.info(f"Inviting {username} to room")
-                    # TODO: Send invite action to server
+            if hasattr(self, 'invite_buttons'):
+                for username, invite_btn in self.invite_buttons.items():
+                    if invite_btn.handle_event(event):
+                        # Send invitation
+                        if self.current_room_id:
+                            send_to_lobby_queue({
+                                "action": "invite",
+                                "data": {
+                                    "target_user": username,
+                                    "room_id": self.current_room_id
+                                }
+                            })
+                            logging.info(f"Inviting {username} to room {self.current_room_id}")
             
-            # Handle create room final button
-            if hasattr(self, 'create_room_final_btn') and self.create_room_final_btn.handle_event(event):
-                # Create the room
-                if hasattr(self, 'current_room_game_id') and self.current_room_game_id:
-                    send_to_lobby_queue({
-                        "action": "create_room",
-                        "data": {
-                            "game_id": self.current_room_game_id,
-                            "is_public": self.room_is_public,
-                            "name": f"{self.username}'s {self._get_game_name(self.current_room_game_id)} Room"
-                        }
-                    })
-                    # Return to my games menu
-                    with self.state_lock:
-                        self.client_state = "MY_GAMES_MENU"
+            # Handle start game button (host only)
+            if hasattr(self, 'start_game_btn') and self.start_game_btn.handle_event(event):
+                if self.current_room_data and self.current_room_data.get("host") == self.username:
+                    send_to_lobby_queue({"action": "start_game"})
+                    logging.info("Requesting game start")
+            
+            # Periodic refresh of online users list (only if room is not full and not playing)
+            if self.current_room_data:
+                players = self.current_room_data.get("players", [])
+                room_status = self.current_room_data.get("status", "idle")
+                if len(players) < 2 and room_status != "playing":
+                    current_time = time.time()
+                    if not hasattr(self, 'last_users_refresh'):
+                        self.last_users_refresh = 0
+                    if current_time - self.last_users_refresh > 5:  # Refresh every 5 seconds
+                        send_to_lobby_queue({"action": "list_users"})
+                        self.last_users_refresh = current_time
 
     def handle_network_message(self, msg):
         """Handles player-specific network messages."""
@@ -179,8 +207,9 @@ class PlayerGUI(BaseGUI):
             with self.state_lock:
                 self.client_state = "LOBBY_MENU"
                 self.error_message = None
-            # Request games list after login
+            # Request games list and rooms list after login
             send_to_lobby_queue({"action": "list_games"})
+            send_to_lobby_queue({"action": "list_rooms"})
         
         elif status == "ok" and "games" in msg:
             # Received games list from server (response to list_games action)
@@ -199,13 +228,72 @@ class PlayerGUI(BaseGUI):
         elif status == "ok" and "users" in msg:
             # Received users list from server (response to list_users action)
             users = msg.get("users", [])
-            # Filter to only online users
-            self.online_users = [u for u in users if u.get("status") == "online" and u.get("username") != self.username]
+            # Filter to only online users (exclude self and players already in room)
+            room_players = self.current_room_data.get("players", []) if self.current_room_data else []
+            self.online_users = [
+                u for u in users 
+                if u.get("status") == "online" 
+                and u.get("username") != self.username
+                and u.get("username") not in room_players
+            ]
             logging.info(f"Received {len(self.online_users)} online users for invitations")
         
         elif status == "ok" and msg.get("action") == "download_game":
             # Game download response
             self._handle_game_download(msg)
+        
+        elif msg.get("type") == "ROOM_UPDATE":
+            # Room update received (room created, player joined, etc.)
+            self.current_room_id = msg.get("room_id")
+            # Update or create room data
+            if not self.current_room_data:
+                self.current_room_data = {}
+            self.current_room_data.update({
+                "room_id": msg.get("room_id"),
+                "name": msg.get("name", self.current_room_data.get("name")),
+                "players": msg.get("players", []),
+                "host": msg.get("host", self.current_room_data.get("host")),
+                "game_id": msg.get("game_id", self.current_room_data.get("game_id")),
+                "game_name": msg.get("game_name", self.current_room_data.get("game_name")),
+                "is_public": msg.get("is_public", self.current_room_data.get("is_public", True)),
+                "status": msg.get("status", self.current_room_data.get("status", "idle"))
+            })
+            # Transition to waiting screen if not already there
+            with self.state_lock:
+                if self.client_state != "ROOM_WAITING" and self.current_room_id:
+                    self.client_state = "ROOM_WAITING"
+            logging.info(f"Room update: room_id={self.current_room_id}, players={self.current_room_data.get('players')}")
+            
+            # Refresh online users list when room updates (to exclude players in room)
+            # Only if room is not full
+            players = self.current_room_data.get("players", [])
+            if len(players) < 2:
+                send_to_lobby_queue({"action": "list_users"})
+        
+        elif msg.get("type") == "KICKED_FROM_ROOM":
+            # User was kicked from room (host left)
+            logging.info(f"Kicked from room: {msg.get('reason')}")
+            self.current_room_id = None
+            self.current_room_data = {}
+            with self.state_lock:
+                self.client_state = "MY_GAMES_MENU"
+        
+        elif status == "ok" and "rooms" in msg:
+            # Received rooms list from server
+            self.game_rooms = msg.get("rooms", [])
+            logging.info(f"Received {len(self.game_rooms)} public rooms")
+        
+        elif msg.get("type") == "GAME_START":
+            # Game server started, transition to game
+            game_host = msg.get("host")
+            game_port = msg.get("port")
+            room_id = msg.get("room_id")
+            logging.info(f"Game started on {game_host}:{game_port} for room {room_id}")
+            # Update room status to playing (room stays open)
+            if self.current_room_data:
+                self.current_room_data["status"] = "playing"
+            # TODO: Connect to game server (will be handled later)
+            # For now, stay in ROOM_WAITING screen but show game is running
         
         else:
             super().handle_network_message(msg)
@@ -266,7 +354,21 @@ class PlayerGUI(BaseGUI):
     def handle_back_button(self, current_state):
         """Custom back button behavior for the player client."""
         with self.state_lock:
-            if current_state == "ROOM_CREATE":
+            if current_state == "ROOM_WAITING":
+                # Leave the room and return to games page
+                if self.current_room_id:
+                    send_to_lobby_queue({
+                        "action": "leave_room",
+                        "data": {}
+                    })
+                    logging.info(f"Leaving room {self.current_room_id}")
+                # Reset room state immediately (optimistic)
+                self.current_room_id = None
+                self.current_room_data = {}
+                self.current_room_game_id = None
+                if hasattr(self, 'invite_buttons'):
+                    self.invite_buttons = {}
+                # Return to MY_GAMES_MENU (not logout)
                 self.client_state = "MY_GAMES_MENU"
             elif current_state in ["STORE_MENU", "MY_GAMES_MENU"]:
                 self.client_state = "LOBBY_MENU"
@@ -385,8 +487,44 @@ class PlayerGUI(BaseGUI):
         self.ui_elements["store_btn"].draw(screen)
         self.ui_elements["my_games_btn"].draw(screen)
         draw_text(screen, "Game Rooms", 50, 100, self.fonts["TITLE"], (255, 255, 255))
-        # Placeholder for room list
-        draw_text(screen, "No rooms available.", 50, 180, self.fonts["MEDIUM"], (200, 200, 200))
+        
+        # Request rooms list periodically
+        current_time = time.time()
+        if not hasattr(self, 'last_rooms_refresh'):
+            self.last_rooms_refresh = 0
+        if current_time - self.last_rooms_refresh > 3:  # Refresh every 3 seconds
+            send_to_lobby_queue({"action": "list_rooms"})
+            self.last_rooms_refresh = current_time
+        
+        # Draw public rooms
+        if not self.game_rooms:
+            draw_text(screen, "No rooms available.", 50, 180, self.fonts["MEDIUM"], (200, 200, 200))
+        else:
+            # Headers
+            draw_text(screen, "Room Name", 50, 150, self.fonts["TINY"], (200, 200, 200))
+            draw_text(screen, "Game", 300, 150, self.fonts["TINY"], (200, 200, 200))
+            draw_text(screen, "Players", 500, 150, self.fonts["TINY"], (200, 200, 200))
+            draw_text(screen, "Action", 650, 150, self.fonts["TINY"], (200, 200, 200))
+            
+            self.room_join_buttons = {}
+            for i, room in enumerate(self.game_rooms):
+                y_pos = 180 + i * 40
+                room_id = room.get("id")
+                room_name = room.get("name", "Unknown")
+                game_name = room.get("game_name", "Unknown")
+                players_count = room.get("players", 0)
+                
+                # Only show rooms that aren't full
+                if players_count < 2:
+                    draw_text(screen, room_name, 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
+                    draw_text(screen, game_name, 300, y_pos, self.fonts["SMALL"], (255, 255, 255))
+                    draw_text(screen, f"{players_count}/2", 500, y_pos, self.fonts["SMALL"], (255, 255, 255))
+                    
+                    # Join button
+                    if room_id not in self.room_join_buttons:
+                        self.room_join_buttons[room_id] = Button(650, y_pos - 5, 100, 30, self.fonts["SMALL"], "Join")
+                    btn = self.room_join_buttons[room_id]
+                    btn.draw(screen)
         
     def _draw_game_table(self, screen, games, title, show_download_btn=False, show_create_room_btn=False):
         """Helper to draw a table of games."""
@@ -471,47 +609,94 @@ class PlayerGUI(BaseGUI):
         logging.debug(f"draw_my_games_menu: my_games has {len(self.my_games)} games")
         self._draw_game_table(screen, self.my_games, "My Games", show_create_room_btn=True)
     
-    def draw_room_create_screen(self, screen):
-        """Draw the room creation screen with online users list."""
-        draw_text(screen, "Create Room", 350, 50, self.fonts["TITLE"], (255, 255, 255))
+    def draw_room_waiting_screen(self, screen):
+        """Draw the room waiting screen - shows room status and allows invitations."""
+        if not self.current_room_data:
+            draw_text(screen, "Loading room...", 350, 300, self.fonts["MEDIUM"], (255, 255, 255))
+            return
         
-        # Show game name
-        if hasattr(self, 'current_room_game_id') and self.current_room_game_id:
-            game_name = self._get_game_name(self.current_room_game_id)
-            draw_text(screen, f"Game: {game_name}", 50, 100, self.fonts["MEDIUM"], (255, 255, 255))
-        else:
-            draw_text(screen, "Game: Unknown", 50, 100, self.fonts["MEDIUM"], (255, 255, 255))
+        room_name = self.current_room_data.get("name", "Unknown Room")
+        game_name = self.current_room_data.get("game_name", "Unknown Game")
+        players = self.current_room_data.get("players", [])
+        host = self.current_room_data.get("host")
+        is_public = self.current_room_data.get("is_public", True)
+        room_type = "Public" if is_public else "Private"
+        room_status = self.current_room_data.get("status", "idle")
         
-        # Show room type
-        room_type = "Public" if self.room_is_public else "Private"
-        draw_text(screen, f"Room Type: {room_type}", 50, 130, self.fonts["SMALL"], (200, 200, 200))
+        # Room title
+        draw_text(screen, f"Room: {room_name}", 50, 50, self.fonts["TITLE"], (255, 255, 255))
+        draw_text(screen, f"Game: {game_name}", 50, 90, self.fonts["MEDIUM"], (200, 200, 200))
+        draw_text(screen, f"Type: {room_type}", 50, 120, self.fonts["SMALL"], (150, 150, 150))
         
-        # Online users list header
-        draw_text(screen, "Online Users (Click to Invite):", 50, 180, self.fonts["MEDIUM"], (200, 200, 200))
+        # Show game status if playing
+        if room_status == "playing":
+            draw_text(screen, "Game in Progress", 50, 150, self.fonts["MEDIUM"], (0, 255, 0))
         
-        # Draw online users list
-        self.invite_buttons = {}
-        if not self.online_users:
-            draw_text(screen, "No other users online.", 50, 220, self.fonts["SMALL"], (150, 150, 150))
-        else:
-            for i, user in enumerate(self.online_users):
-                y_pos = 220 + i * 40
-                username = user.get("username", "Unknown")
-                status = user.get("status", "unknown")
+        # Players section
+        draw_text(screen, "Players:", 50, 190, self.fonts["MEDIUM"], (255, 255, 255))
+        for i, player in enumerate(players):
+            y_pos = 230 + i * 40
+            player_text = f"P{i+1}: {player}"
+            if player == host:
+                player_text += " (Host)"
+            draw_text(screen, player_text, 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
+        
+        # Show waiting message if not full and not playing
+        if room_status != "playing":
+            if len(players) < 2:
+                draw_text(screen, f"Waiting for {2 - len(players)} more player(s)...", 50, 310, self.fonts["SMALL"], (200, 200, 200))
                 
-                # Create invite button for each user
-                if username not in self.invite_buttons:
-                    self.invite_buttons[username] = Button(50, y_pos - 5, 300, 35, self.fonts["SMALL"], f"Invite {username}")
-                btn = self.invite_buttons[username]
-                btn.draw(screen)
+                # Online users list for invitations
+                draw_text(screen, "Invite Players:", 450, 190, self.fonts["MEDIUM"], (255, 255, 255))
                 
-                # Show user status
-                draw_text(screen, f"({status})", 360, y_pos, self.fonts["TINY"], (150, 150, 150))
-        
-        # Create room button (without invitation for now)
-        if not hasattr(self, 'create_room_final_btn'):
-            self.create_room_final_btn = Button(50, 500, 200, 40, self.fonts["MEDIUM"], "Create Room")
-        self.create_room_final_btn.draw(screen)
+                # Initialize invite_buttons if not exists
+                if not hasattr(self, 'invite_buttons'):
+                    self.invite_buttons = {}
+                
+                # Request users list if we don't have it or it's empty (only once per refresh)
+                if not self.online_users:
+                    current_time = time.time()
+                    if not hasattr(self, 'last_users_request') or current_time - getattr(self, 'last_users_request', 0) > 2:
+                        send_to_lobby_queue({"action": "list_users"})
+                        self.last_users_request = current_time
+                    draw_text(screen, "Loading users...", 450, 230, self.fonts["SMALL"], (150, 150, 150))
+                else:
+                    # Filter out users already in the room
+                    available_users = [u for u in self.online_users if u.get("username") not in players]
+                    
+                    if not available_users:
+                        draw_text(screen, "No other users available.", 450, 230, self.fonts["SMALL"], (150, 150, 150))
+                    else:
+                        # Draw online users with invite buttons
+                        for i, user in enumerate(available_users):
+                            y_pos = 230 + i * 40
+                            username = user.get("username", "Unknown")
+                            
+                            # Create invite button for each user (reuse if exists)
+                            if username not in self.invite_buttons:
+                                self.invite_buttons[username] = Button(450, y_pos - 5, 200, 35, self.fonts["SMALL"], f"Invite {username}")
+                            btn = self.invite_buttons[username]
+                            # Update button position in case list changed
+                            btn.rect.y = y_pos - 5
+                            btn.draw(screen)
+                            
+                            # Show user status
+                            status = user.get("status", "unknown")
+                            draw_text(screen, f"({status})", 660, y_pos, self.fonts["TINY"], (150, 150, 150))
+            else:
+                # Room is full
+                draw_text(screen, "Room is full!", 50, 310, self.fonts["MEDIUM"], (0, 255, 0))
+                if host == self.username:
+                    # Host can start the game
+                    if not hasattr(self, 'start_game_btn'):
+                        self.start_game_btn = Button(50, 350, 200, 40, self.fonts["MEDIUM"], "Start Game")
+                    self.start_game_btn.draw(screen)
+                else:
+                    draw_text(screen, "Waiting for host to start...", 50, 350, self.fonts["SMALL"], (200, 200, 200))
+        else:
+            # Game is playing
+            draw_text(screen, "Game is running...", 50, 310, self.fonts["MEDIUM"], (0, 255, 0))
+            draw_text(screen, "Room remains open until game ends", 50, 350, self.fonts["SMALL"], (150, 150, 150))
 
     def _attempt_registration(self):
         # Players should not register as developers

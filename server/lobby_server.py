@@ -379,7 +379,8 @@ def handle_create_room(client_sock: socket.socket, username: str, data: dict):
         "host": username,
         "game_id": game_id,
         "game_name": game_name,
-        "is_public": is_public
+        "is_public": is_public,
+        "status": "idle"
     }
     send_to_client(client_sock, room_update_msg)
     
@@ -449,6 +450,8 @@ def handle_join_room(client_sock: socket.socket, username: str, data: dict):
     logging.info(f"User '{username}' joined room {room_id}.")
 
     # 5. Notify all players in the room of the change
+    with g_room_lock:
+        room_status = room.get("status", "idle")
     room_update_msg = {
         "type": "ROOM_UPDATE",
         "room_id": room_id,
@@ -456,7 +459,8 @@ def handle_join_room(client_sock: socket.socket, username: str, data: dict):
         "host": room.get("host"),
         "game_id": room.get("game_id"),
         "game_name": room.get("game_name"),
-        "is_public": room.get("is_public", True)
+        "is_public": room.get("is_public", True),
+        "status": room_status
     }
     
     with g_session_lock:
@@ -508,11 +512,17 @@ def handle_leave_room(username: str):
             logging.info(f"Room {room_id} closed.")
         else:
             # Notify remaining players of the updated room state
+            with g_room_lock:
+                room_status = room.get("status", "idle")
             room_update_msg = {
                 "type": "ROOM_UPDATE",
                 "room_id": room_id,
                 "players": room["players"],
-                "host": room.get("host")
+                "host": room.get("host"),
+                "game_id": room.get("game_id"),
+                "game_name": room.get("game_name"),
+                "is_public": room.get("is_public", True),
+                "status": room_status
             }
             with g_session_lock:
                 for player_name in room["players"]:
@@ -660,7 +670,8 @@ def handle_start_game(client_sock: socket.socket, username: str):
         game_info_msg = {
             "type": "GAME_START",
             "host": config.LOBBY_HOST,
-            "port": game_port
+            "port": game_port,
+            "room_id": room_id
         }
         
         # Notify both players
