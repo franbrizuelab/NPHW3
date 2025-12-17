@@ -2,6 +2,7 @@
 
 import sys
 import os
+import logging
 
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -9,8 +10,11 @@ project_root = os.path.dirname(current_dir) # Go up one level
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from gui.base_gui import BaseGUI, draw_text, Button, TextInput
+from gui.base_gui import BaseGUI, draw_text
 
+
+from gui.base_gui import BaseGUI, draw_text, Button, TextInput
+from client.shared import send_to_lobby_queue
 class PlayerGUI(BaseGUI):
     def __init__(self):
         super().__init__(title="Player Client")
