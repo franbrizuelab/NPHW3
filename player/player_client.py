@@ -3,6 +3,7 @@
 import sys
 import os
 import logging
+import base64
 
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -10,17 +11,17 @@ project_root = os.path.dirname(current_dir) # Go up one level
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from gui.base_gui import BaseGUI, draw_text
-
-
 from gui.base_gui import BaseGUI, draw_text, Button, TextInput
 from client.shared import send_to_lobby_queue
+
 class PlayerGUI(BaseGUI):
     def __init__(self):
         super().__init__(title="Player Client")
         self.all_games = [] # Games available in the store
         self.my_games = []  # Games downloaded by the player
         self.game_rooms = [] # Available rooms in the lobby
+        self.download_buttons = {}  # Maps game_id to Button object
+        self.create_room_buttons = {}  # Maps game_id to Button object
 
     def _create_ui_elements(self):
         super()._create_ui_elements()
@@ -43,26 +44,115 @@ class PlayerGUI(BaseGUI):
                 self.scan_downloaded_games() # Rescan just in case
                 self.client_state = "MY_GAMES_MENU"
         elif state == "STORE_MENU":
-            # Handle game download clicks in the future
-            pass
+            # Handle download button clicks
+            for game_id, btn in self.download_buttons.items():
+                if btn.handle_event(event):
+                    # Check if already downloaded
+                    if self._is_game_downloaded(game_id):
+                        logging.info(f"Game {game_id} already downloaded")
+                        continue
+                    # Send download request
+                    send_to_lobby_queue({
+                        "action": "download_game",
+                        "data": {"game_id": game_id}
+                    })
+                    logging.info(f"Requested download for game {game_id}")
         elif state == "MY_GAMES_MENU":
-            # Handle game launch clicks in the future
-            pass
+            # Handle create room button clicks
+            for game_id, btn in self.create_room_buttons.items():
+                if btn.handle_event(event):
+                    # Create room for this game
+                    send_to_lobby_queue({
+                        "action": "create_room",
+                        "data": {
+                            "game_id": game_id,
+                            "is_public": True,  # Default to public, can be made configurable
+                            "name": f"{self.username}'s {self._get_game_name(game_id)} Room"
+                        }
+                    })
+                    logging.info(f"Creating room for game {game_id}")
 
     def handle_network_message(self, msg):
         """Handles player-specific network messages."""
         msg_type = msg.get("type")
+        status = msg.get("status")
 
         if msg_type == "all_games_list":
             self.all_games = msg.get("games", [])
+            # Update download buttons when games list is received
+            self._update_download_buttons()
         
-        elif msg.get("status") == "ok" and msg.get("reason") == "login_successful":
+        elif status == "ok" and msg.get("reason") == "login_successful":
             with self.state_lock:
                 self.client_state = "LOBBY_MENU"
                 self.error_message = None
+            # Request games list after login
+            send_to_lobby_queue({"action": "list_games"})
+        
+        elif status == "ok" and msg.get("action") == "list_games":
+            # Received games list from server
+            self.all_games = msg.get("games", [])
+            self._update_download_buttons()
+        
+        elif status == "ok" and msg.get("action") == "download_game":
+            # Game download response
+            self._handle_game_download(msg)
         
         else:
             super().handle_network_message(msg)
+    
+    def _handle_game_download(self, msg):
+        """Handle game download response and save file."""
+        try:
+            game_id = msg.get("game_id")
+            version = msg.get("version")
+            file_data_b64 = msg.get("file_data")
+            # Get game name from response (preferred) or from all_games list
+            game_name = msg.get("game_name")
+            
+            if not game_name:
+                # Fallback: Find game name from all_games list
+                for game in self.all_games:
+                    if game.get("id") == game_id:
+                        game_name = game.get("name", f"game_{game_id}")
+                        break
+            
+            if not game_name:
+                game_name = f"game_{game_id}"
+            
+            if not file_data_b64:
+                logging.error("No file data in download response")
+                return
+            
+            # Decode file data
+            file_data = base64.b64decode(file_data_b64)
+            
+            # Save to user's download directory
+            if not self.username:
+                logging.error("Cannot download game: not logged in")
+                return
+            
+            user_download_dir = os.path.join("player", "downloads", self.username)
+            os.makedirs(user_download_dir, exist_ok=True)
+            
+            # Save as {game_name}.py
+            file_path = os.path.join(user_download_dir, f"{game_name}.py")
+            with open(file_path, 'wb') as f:
+                f.write(file_data)
+            
+            logging.info(f"Downloaded game '{game_name}' to {file_path}")
+            
+            # Rescan downloaded games
+            self.scan_downloaded_games()
+            self._update_download_buttons()
+            
+        except Exception as e:
+            logging.error(f"Error handling game download: {e}")
+    
+    def _update_download_buttons(self):
+        """Update download buttons for games in store."""
+        self.download_buttons = {}
+        # Buttons will be created dynamically in draw_store_menu
 
     def handle_back_button(self, current_state):
         """Custom back button behavior for the player client."""
@@ -74,7 +164,6 @@ class PlayerGUI(BaseGUI):
 
     def scan_downloaded_games(self):
         """Scans the user's download directory to find owned games."""
-        # Placeholder implementation
         logging.info(f"Scanning for downloaded games for user {self.username}...")
         self.my_games = [] # Reset
         if not self.username:
@@ -84,13 +173,60 @@ class PlayerGUI(BaseGUI):
         if not os.path.exists(user_download_dir):
             return
         
-        # This is a simplified scan. A real implementation would read metadata files.
-        for game_dir in os.listdir(user_download_dir):
-            self.my_games.append({
-                "name": f"Downloaded: {game_dir}",
-                "current_version": "1.0.0", # Placeholder
-                "description": "A locally stored game." # Placeholder
-            })
+        # Scan for .py files
+        downloaded_files = {}
+        for filename in os.listdir(user_download_dir):
+            if filename.endswith('.py'):
+                # Extract game name from filename (remove .py extension)
+                game_name = filename[:-3]
+                file_path = os.path.join(user_download_dir, filename)
+                downloaded_files[game_name] = file_path
+        
+        # Match with games from server to get full metadata
+        for game in self.all_games:
+            game_name = game.get("name", "")
+            if game_name in downloaded_files:
+                # Game is downloaded
+                self.my_games.append({
+                    "id": game.get("id"),
+                    "name": game.get("name"),
+                    "current_version": game.get("current_version", "1.0.0"),
+                    "description": game.get("description", ""),
+                    "author": game.get("author", "")
+                })
+        
+        # Also include any downloaded games not in server list (orphaned)
+        for game_name, file_path in downloaded_files.items():
+            if not any(g.get("name") == game_name for g in self.my_games):
+                self.my_games.append({
+                    "id": None,
+                    "name": game_name,
+                    "current_version": "unknown",
+                    "description": "Downloaded game (not in server list)",
+                    "author": "unknown"
+                })
+        
+        # Update create room buttons
+        self._update_create_room_buttons()
+    
+    def _is_game_downloaded(self, game_id):
+        """Check if a game is already downloaded."""
+        for game in self.my_games:
+            if game.get("id") == game_id:
+                return True
+        return False
+    
+    def _get_game_name(self, game_id):
+        """Get game name by ID."""
+        for game in self.all_games + self.my_games:
+            if game.get("id") == game_id:
+                return game.get("name", f"Game {game_id}")
+        return f"Game {game_id}"
+    
+    def _update_create_room_buttons(self):
+        """Update create room buttons for downloaded games."""
+        self.create_room_buttons = {}
+        # Buttons will be created dynamically in draw_my_games_menu
             
     def draw_lobby_menu(self, screen):
         self.ui_elements["store_btn"].draw(screen)
@@ -99,7 +235,7 @@ class PlayerGUI(BaseGUI):
         # Placeholder for room list
         draw_text(screen, "No rooms available.", 50, 180, self.fonts["MEDIUM"], (200, 200, 200))
         
-    def _draw_game_table(self, screen, games, title):
+    def _draw_game_table(self, screen, games, title, show_download_btn=False, show_create_room_btn=False):
         """Helper to draw a table of games."""
         draw_text(screen, title, 350, 50, self.fonts["TITLE"], (255, 255, 255))
         
@@ -107,6 +243,8 @@ class PlayerGUI(BaseGUI):
         draw_text(screen, "Name", 50, 150, self.fonts["MEDIUM"], (200, 200, 200))
         draw_text(screen, "Version", 350, 150, self.fonts["MEDIUM"], (200, 200, 200))
         draw_text(screen, "Description", 500, 150, self.fonts["MEDIUM"], (200, 200, 200))
+        if show_download_btn or show_create_room_btn:
+            draw_text(screen, "Action", 750, 150, self.fonts["MEDIUM"], (200, 200, 200))
 
         if not games:
             draw_text(screen, "No games to display.", 50, 220, self.fonts["MEDIUM"], (200, 200, 200))
@@ -114,19 +252,38 @@ class PlayerGUI(BaseGUI):
             
         for i, game in enumerate(games):
             y_pos = 200 + i * 40
-            draw_text(screen, str(game.get('name', 'N/A')), 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
+            game_id = game.get('id')
+            game_name = str(game.get('name', 'N/A'))
+            
+            draw_text(screen, game_name, 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
             draw_text(screen, str(game.get('current_version', 'N/A')), 350, y_pos, self.fonts["SMALL"], (255, 255, 255))
             # Truncate long descriptions
             desc = str(game.get('description', 'N/A'))
             if len(desc) > 30:
                 desc = desc[:27] + "..."
             draw_text(screen, desc, 500, y_pos, self.fonts["SMALL"], (255, 255, 255))
+            
+            # Download button for store
+            if show_download_btn and game_id:
+                if game_id not in self.download_buttons:
+                    self.download_buttons[game_id] = Button(750, y_pos - 5, 100, 30, self.fonts["SMALL"], 
+                                                           "Download" if not self._is_game_downloaded(game_id) else "Downloaded")
+                btn = self.download_buttons[game_id]
+                btn.text = "Downloaded" if self._is_game_downloaded(game_id) else "Download"
+                btn.draw(screen)
+            
+            # Create room button for my games
+            if show_create_room_btn and game_id:
+                if game_id not in self.create_room_buttons:
+                    self.create_room_buttons[game_id] = Button(750, y_pos - 5, 100, 30, self.fonts["SMALL"], "Create Room")
+                btn = self.create_room_buttons[game_id]
+                btn.draw(screen)
 
     def draw_store_menu(self, screen):
-        self._draw_game_table(screen, self.all_games, "Game Store")
+        self._draw_game_table(screen, self.all_games, "Game Store", show_download_btn=True)
         
     def draw_my_games_menu(self, screen):
-        self._draw_game_table(screen, self.my_games, "My Games")
+        self._draw_game_table(screen, self.my_games, "My Games", show_create_room_btn=True)
 
     def _attempt_registration(self):
         # Players should not register as developers

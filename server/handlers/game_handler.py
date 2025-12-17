@@ -147,7 +147,9 @@ def handle_download_game(client_sock: socket.socket, data: dict, db_host: str, d
         
         send_to_client(client_sock, {
             "status": "ok",
+            "action": "download_game",  # Include action for client to identify response
             "game_id": game_id,
+            "game_name": game.get("name"),  # Include game name for file naming
             "version": version,
             "file_data": file_data_b64,
             "file_hash": version_info.get("file_hash")

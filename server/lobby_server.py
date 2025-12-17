@@ -48,10 +48,12 @@ logging.basicConfig(level=logging.INFO, format='[LOBBY_SERVER] %(asctime)s - %(m
 g_client_sessions = {}
 g_session_lock = threading.Lock()
 
-# g_rooms: maps {room_id: {"name": str, "host": str, "players": [list_of_usernames], "status": "idle"}}
+# g_rooms: maps {room_id: {"name": str, "host": str, "players": [list_of_usernames], "status": "idle", "game_id": int|None, "is_public": bool, "game_name": str|None}}
 g_rooms = {}
 g_room_lock = threading.Lock()
 g_room_counter = 100 # Simple room ID counter
+g_pending_invites = {}  # Maps username to list of invite objects: {"from": str, "room_id": int, "game_name": str}
+g_invite_lock = threading.Lock()
 
 # DB Helper Function
 
@@ -267,21 +269,39 @@ def handle_logout(username: str):
 
 # Handles 'list_rooms' action.
 def handle_list_rooms(client_sock: socket.socket):
+    """
+    Lists public rooms. If client_sock is None, broadcasts to all clients.
+    """
     # This just gets the LIVE rooms from memory.
-    # (A better version might query the DB for public/persistent rooms)
+    # Only show public, idle rooms
     
     public_rooms = []
     with g_room_lock:
         for room_id, room_data in g_rooms.items():
-            if room_data["status"] == "idle": # Only show idle rooms
+            # Only show public, idle rooms
+            if room_data["status"] == "idle" and room_data.get("is_public", True):
                 public_rooms.append({
                     "id": room_id,
                     "name": room_data["name"],
                     "host": room_data["host"],
-                    "players": len(room_data["players"])
+                    "players": len(room_data["players"]),
+                    "game_id": room_data.get("game_id"),
+                    "game_name": room_data.get("game_name")
                 })
-                
-    send_to_client(client_sock, {"status": "ok", "rooms": public_rooms})
+    
+    response = {"status": "ok", "rooms": public_rooms}
+    
+    if client_sock:
+        # Send to specific client
+        send_to_client(client_sock, response)
+    else:
+        # Broadcast to all clients
+        with g_session_lock:
+            for session in g_client_sessions.values():
+                try:
+                    send_to_client(session["sock"], response)
+                except Exception as e:
+                    logging.warning(f"Failed to broadcast room list: {e}")
 
 def handle_list_users(client_sock: socket.socket):
     """Handles 'list_users' action."""
@@ -299,6 +319,8 @@ def handle_create_room(client_sock: socket.socket, username: str, data: dict):
     """Handles 'create_room' action."""
     global g_room_counter
     room_name = data.get("name", f"{username}'s Room")
+    game_id = data.get("game_id")  # Optional game association
+    is_public = data.get("is_public", True)  # Default to public
     
     # 1. Check if user is already in another room
     with g_session_lock:
@@ -311,9 +333,24 @@ def handle_create_room(client_sock: socket.socket, username: str, data: dict):
             send_to_client(client_sock, {"status": "error", "reason": "already_in_a_room"})
             return
     
+    # 2. If game_id provided, fetch game name from DB
+    game_name = None
+    if game_id:
+        db_request = {
+            "collection": "Game",
+            "action": "query",
+            "data": {"game_id": game_id}
+        }
+        db_response = forward_to_db(db_request)
+        if db_response and db_response.get("status") == "ok":
+            game = db_response.get("game", {})
+            game_name = game.get("name")
+        else:
+            logging.warning(f"Game {game_id} not found, creating room without game name")
+    
     room_id = -1
     with g_room_lock:
-        # 2. Create a new room
+        # 3. Create a new room
         room_id = g_room_counter
         g_room_counter += 1
         
@@ -321,24 +358,34 @@ def handle_create_room(client_sock: socket.socket, username: str, data: dict):
             "name": room_name,
             "host": username,
             "players": [username],
-            "status": "idle"
+            "status": "idle",
+            "game_id": game_id,
+            "is_public": is_public,
+            "game_name": game_name
         }
     
-    # 3. Update the user's status
+    # 4. Update the user's status
     with g_session_lock:
         g_client_sessions[username]["status"] = f"in_room_{room_id}"
         
-    logging.info(f"User '{username}' created room {room_id} ('{room_name}').")
+    logging.info(f"User '{username}' created room {room_id} ('{room_name}') - Game: {game_name or 'None'}, Public: {is_public}")
     
-    # 4. Send the new room data back to the client
+    # 5. Send the new room data back to the client
     room_update_msg = {
         "type": "ROOM_UPDATE",
         "room_id": room_id,
         "name": room_name,
         "players": [username], # Creator is the only one in it
-        "host": username
+        "host": username,
+        "game_id": game_id,
+        "game_name": game_name,
+        "is_public": is_public
     }
     send_to_client(client_sock, room_update_msg)
+    
+    # 6. Broadcast room list update to all clients (for public rooms)
+    if is_public:
+        handle_list_rooms(None)  # Broadcast to all
 
 def handle_join_room(client_sock: socket.socket, username: str, data: dict):
     """Handles 'join_room' action."""
@@ -369,6 +416,23 @@ def handle_join_room(client_sock: socket.socket, username: str, data: dict):
         if room["status"] != "idle":
             send_to_client(client_sock, {"status": "error", "reason": "room_is_playing"})
             return
+        
+        # Check if room is private and user was invited
+        if not room.get("is_public", True):
+            # Private room - check if user was invited
+            with g_invite_lock:
+                user_invites = g_pending_invites.get(username, [])
+                invited_to_room = any(inv.get("room_id") == room_id for inv in user_invites)
+            
+            if not invited_to_room and username not in room["players"]:
+                send_to_client(client_sock, {"status": "error", "reason": "room_is_private_not_invited"})
+                return
+            
+            # Remove invite if user was invited
+            if invited_to_room:
+                with g_invite_lock:
+                    g_pending_invites[username] = [inv for inv in g_pending_invites.get(username, []) 
+                                                   if inv.get("room_id") != room_id]
             
         if len(room["players"]) >= 2:
             send_to_client(client_sock, {"status": "error", "reason": "room_is_full"})
@@ -389,7 +453,10 @@ def handle_join_room(client_sock: socket.socket, username: str, data: dict):
         "type": "ROOM_UPDATE",
         "room_id": room_id,
         "players": all_players_in_room,
-        "host": room.get("host")
+        "host": room.get("host"),
+        "game_id": room.get("game_id"),
+        "game_name": room.get("game_name"),
+        "is_public": room.get("is_public", True)
     }
     
     with g_session_lock:
@@ -563,6 +630,7 @@ def handle_invite(client_sock: socket.socket, inviter_username: str, data: dict)
 
     room_id = None
     target_sock = None
+    game_name = None
     
     with g_session_lock:
         # 1. Get inviter's room
@@ -576,6 +644,12 @@ def handle_invite(client_sock: socket.socket, inviter_username: str, data: dict)
         if room_id is None:
             send_to_client(client_sock, {"status": "error", "reason": "not_in_a_room"})
             return
+        
+        # Get room info for invite message
+        with g_room_lock:
+            room = g_rooms.get(room_id)
+            if room:
+                game_name = room.get("game_name")
             
         # 2. Find target user and check their status
         target_session = g_client_sessions.get(target_username)
@@ -589,16 +663,27 @@ def handle_invite(client_sock: socket.socket, inviter_username: str, data: dict)
         
         target_sock = target_session["sock"]
 
-    # 3. Send the invite
+    # 3. Store invite in pending invites
+    with g_invite_lock:
+        if target_username not in g_pending_invites:
+            g_pending_invites[target_username] = []
+        g_pending_invites[target_username].append({
+            "from": inviter_username,
+            "room_id": room_id,
+            "game_name": game_name
+        })
+
+    # 4. Send the invite
     if target_sock:
         invite_msg = {
             "type": "INVITE_RECEIVED",
             "from_user": inviter_username,
-            "room_id": room_id
+            "room_id": room_id,
+            "game_name": game_name
         }
         send_to_client(target_sock, invite_msg)
         send_to_client(client_sock, {"status": "ok", "reason": "invite_sent"})
-        logging.info(f"User '{inviter_username}' invited '{target_username}' to room {room_id}.")
+        logging.info(f"User '{inviter_username}' invited '{target_username}' to room {room_id} (Game: {game_name or 'None'}).")
     else:
         # This case should be rare but good to handle
         send_to_client(client_sock, {"status": "error", "reason": "could_not_find_target_socket"})
@@ -625,13 +710,15 @@ def handle_game_over(room_id: int):
 
         # Broadcast the changes to all clients
         public_rooms = []
-        for room_id, room_data in g_rooms.items():
-            if room_data["status"] == "idle": # Only show idle rooms
+        for rid, room_data in g_rooms.items():
+            if room_data["status"] == "idle" and room_data.get("is_public", True): # Only show public, idle rooms
                 public_rooms.append({
-                    "id": room_id,
+                    "id": rid,
                     "name": room_data["name"],
                     "host": room_data["host"],
-                    "players": len(room_data["players"])
+                    "players": len(room_data["players"]),
+                    "game_id": room_data.get("game_id"),
+                    "game_name": room_data.get("game_name")
                 })
         user_list = []
         user_list = [

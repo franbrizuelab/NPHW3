@@ -60,6 +60,36 @@ def calculate_file_hash(file_data: bytes) -> str:
     """Calculate SHA256 hash of file data."""
     return hashlib.sha256(file_data).hexdigest()
 
+def read_game_from_developer_folder(file_name: str) -> bytes | None:
+    """
+    Read a game file from developer/games/ folder.
+    Returns file data as bytes, or None if file not found.
+    """
+    developer_games_dir = os.path.join("developer", "games")
+    file_path = os.path.join(developer_games_dir, file_name)
+    
+    # Security: Ensure file is within developer/games directory (prevent path traversal)
+    abs_developer_dir = os.path.abspath(developer_games_dir)
+    abs_file_path = os.path.abspath(file_path)
+    
+    if not abs_file_path.startswith(abs_developer_dir):
+        logger.error(f"Invalid file path: {file_name} (path traversal attempt?)")
+        return None
+    
+    try:
+        if not os.path.exists(file_path):
+            logger.error(f"Game file not found: {file_path}")
+            return None
+        
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+        
+        logger.info(f"Read game file from developer folder: {file_path} ({len(file_data)} bytes)")
+        return file_data
+    except Exception as e:
+        logger.error(f"Error reading game file from developer folder: {e}")
+        return None
+
 def save_game_file(game_id: int, version: str, file_data: bytes, storage_dir: str = "storage/games") -> Optional[str]:
     """Save game file to storage. Returns file path or None."""
     try:
@@ -69,8 +99,8 @@ def save_game_file(game_id: int, version: str, file_data: bytes, storage_dir: st
         game_dir = os.path.join(storage_dir, str(game_id), f"v{version}")
         os.makedirs(game_dir, exist_ok=True)
         
-        # Save game_server.py
-        file_path = os.path.join(game_dir, "game_server.py")
+        # Save as game.py (changed from game_server.py to match plan)
+        file_path = os.path.join(game_dir, "game.py")
         with open(file_path, 'wb') as f:
             f.write(file_data)
         
@@ -91,18 +121,31 @@ def handle_upload_game(client_sock: socket.socket, username: str, data: dict,
     name = data.get('name')
     description = data.get('description', '')
     version = data.get('version', '1.0.0')
-    file_data_str = data.get('file_data')  # Base64 encoded or raw bytes
+    file_data_str = data.get('file_data')  # Base64 encoded file data (Mode 1)
+    file_name = data.get('file_name')  # File name in developer/games/ (Mode 2)
     
-    if not name or not file_data_str:
-        return {"status": "error", "reason": "missing_fields"}
+    if not name:
+        return {"status": "error", "reason": "missing_name"}
     
-    # Decode file data (assuming base64)
-    import base64
-    try:
-        file_data = base64.b64decode(file_data_str)
-    except Exception as e:
-        logger.error(f"Error decoding file data: {e}")
-        return {"status": "error", "reason": "invalid_file_data"}
+    # Mode 1: Direct file upload via base64
+    # Mode 2: File reference from developer/games/
+    file_data = None
+    
+    if file_data_str:
+        # Mode 1: Decode base64 file data
+        import base64
+        try:
+            file_data = base64.b64decode(file_data_str)
+        except Exception as e:
+            logger.error(f"Error decoding file data: {e}")
+            return {"status": "error", "reason": "invalid_file_data"}
+    elif file_name:
+        # Mode 2: Read from developer/games/ folder
+        file_data = read_game_from_developer_folder(file_name)
+        if file_data is None:
+            return {"status": "error", "reason": "file_not_found_in_developer_folder"}
+    else:
+        return {"status": "error", "reason": "missing_file_data_or_file_name"}
     
     # Calculate file hash
     file_hash = calculate_file_hash(file_data)
@@ -160,13 +203,14 @@ def handle_update_game(client_sock: socket.socket, username: str, data: dict,
     
     game_id = data.get('game_id')
     version = data.get('version')
-    file_data_str = data.get('file_data')
+    file_data_str = data.get('file_data')  # Mode 1: base64
+    file_name = data.get('file_name')  # Mode 2: from developer/games/
     description = data.get('description')
     
     if not game_id or not version:
         return {"status": "error", "reason": "missing_game_id_or_version"}
     
-    if not file_data_str:
+    if not file_data_str and not file_name:
         # Update metadata only
         db_request = {
             "collection": "Game",
@@ -194,13 +238,21 @@ def handle_update_game(client_sock: socket.socket, username: str, data: dict,
     if game.get("author") != username:
         return {"status": "error", "reason": "not_game_owner"}
     
-    # Decode file data
-    import base64
-    try:
-        file_data = base64.b64decode(file_data_str)
-    except Exception as e:
-        logger.error(f"Error decoding file data: {e}")
-        return {"status": "error", "reason": "invalid_file_data"}
+    # Get file data - Mode 1 or Mode 2
+    file_data = None
+    if file_data_str:
+        # Mode 1: Decode base64 file data
+        import base64
+        try:
+            file_data = base64.b64decode(file_data_str)
+        except Exception as e:
+            logger.error(f"Error decoding file data: {e}")
+            return {"status": "error", "reason": "invalid_file_data"}
+    elif file_name:
+        # Mode 2: Read from developer/games/ folder
+        file_data = read_game_from_developer_folder(file_name)
+        if file_data is None:
+            return {"status": "error", "reason": "file_not_found_in_developer_folder"}
     
     # Calculate file hash
     file_hash = calculate_file_hash(file_data)

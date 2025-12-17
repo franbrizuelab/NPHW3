@@ -4,6 +4,7 @@
 import socket
 import threading
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,21 @@ def send_to_client(client_sock: socket.socket, response: dict):
     except Exception as e:
         logger.warning(f"Failed to send message to client: {e}")
 
+def ensure_user_download_dir(username: str) -> str:
+    """
+    Ensures the user's download directory exists.
+    Creates player/downloads/{username}/ if it doesn't exist.
+    Returns the path to the directory.
+    """
+    download_dir = os.path.join("player", "downloads", username)
+    try:
+        os.makedirs(download_dir, exist_ok=True)
+        logger.info(f"Ensured download directory exists for user: {username}")
+        return download_dir
+    except Exception as e:
+        logger.error(f"Failed to create download directory for {username}: {e}")
+        return download_dir  # Return path even if creation failed
+
 def handle_register(client_sock: socket.socket, data: dict, db_host: str, db_port: int) -> dict:
     """Handles 'register' action."""
     username = data.get('user')
@@ -74,6 +90,10 @@ def handle_register(client_sock: socket.socket, data: dict, db_host: str, db_por
         "data": db_data
     }
     db_response = forward_to_db(db_request, db_host, db_port)
+    
+    # If registration successful, create user download directory
+    if db_response and db_response.get("status") == "ok":
+        ensure_user_download_dir(username)
     
     # Pass the DB response directly back to the client
     return db_response
@@ -114,6 +134,9 @@ def handle_login(client_sock: socket.socket, addr: tuple, data: dict,
     if db_response and db_response.get("status") == "ok":
         # Login successful!
         logger.info(f"User '{username}' logged in from {addr}.")
+        
+        # Ensure user download directory exists
+        ensure_user_download_dir(username)
         
         # Add to our live session tracking
         with session_lock:
