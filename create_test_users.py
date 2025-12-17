@@ -13,12 +13,10 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 from common.db_schema import initialize_database
-from common.db_operations import DatabaseOperations
 from common.password_utils import hash_password
 
 def main():
-    conn = initialize_database()
-    db_ops = DatabaseOperations(conn)
+    db_ops = initialize_database()
     
     # Test users to create
     test_users = [
@@ -65,8 +63,6 @@ def main():
         password = user_info["password"]
         is_dev = " (developer)" if user_info["is_developer"] else ""
         print(f"  {username} / {password}{is_dev}")
-    
-    conn.close()
 
 if __name__ == "__main__":
     main()

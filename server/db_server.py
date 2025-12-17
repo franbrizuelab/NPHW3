@@ -3,7 +3,7 @@
 # TCP server that listens on a dedicated port.
 # Uses the Length-Prefixed Framing Protocol from common.protocol.
 # All requests and responses are JSON strings.
-# Persists data to SQLite database.
+# Persists data to JSON file storage.
 # Uses threading to handle multiple concurrent clients.
 
 import socket
@@ -12,7 +12,6 @@ import json
 import os
 import sys
 import logging
-import sqlite3
 
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -24,8 +23,7 @@ if project_root not in sys.path:
 try:
     from common import config
     from common.protocol import send_msg, recv_msg
-    from common.db_schema import initialize_database, migrate_from_json
-    from common.db_operations import DatabaseOperations
+    from common.db_schema import initialize_database
     from common.password_utils import hash_password, verify_password
 except ImportError as e:
     print(f"Error: Could not import required modules: {e}")
@@ -36,13 +34,9 @@ except ImportError as e:
 DB_HOST = config.DB_HOST
 DB_PORT = config.DB_PORT
 STORAGE_DIR = 'storage'
-USER_DB_FILE = os.path.join(STORAGE_DIR, 'users.json')
-GAMELOG_DB_FILE = os.path.join(STORAGE_DIR, 'gamelogs.json')
 
-# Database connection (shared across threads, SQLite handles thread-safety)
-db_conn = None
+# Database operations instance (thread-safe with internal locking)
 db_ops = None
-db_lock = threading.Lock()  # For operations that need explicit locking
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='[DB_SERVER] %(asctime)s - %(message)s')
@@ -50,21 +44,13 @@ logging.basicConfig(level=logging.INFO, format='[DB_SERVER] %(asctime)s - %(mess
 # Database Helper Functions
 
 def setup_database():
-    """Initialize SQLite database and migrate from JSON if needed."""
-    global db_conn, db_ops
+    """Initialize JSON file storage."""
+    global db_ops
     
     try:
-        # Initialize database
-        db_conn = initialize_database()
-        db_ops = DatabaseOperations(db_conn)
-        
-        # Migrate from JSON files if they exist
-        if os.path.exists(USER_DB_FILE) or os.path.exists(GAMELOG_DB_FILE):
-            logging.info("JSON files detected, migrating to SQLite...")
-            migrate_from_json(db_conn, USER_DB_FILE, GAMELOG_DB_FILE)
-            logging.info("Migration completed")
-        
-        logging.info("Database initialized successfully")
+        # Initialize JSON storage
+        db_ops = initialize_database(storage_dir=STORAGE_DIR)
+        logging.info("JSON storage initialized successfully")
     except Exception as e:
         logging.critical(f"Failed to initialize database: {e}")
         sys.exit(1)
