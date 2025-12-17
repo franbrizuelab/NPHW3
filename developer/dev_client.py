@@ -169,7 +169,7 @@ class DeveloperGUI(BaseGUI):
         self.ui_elements["game_desc_input"] = TextInput(300, 250, 400, 90, self.fonts["TINY"], multiline=True) # Larger height, multiline, smaller font
         self.ui_elements["game_version_input"] = TextInput(300, 350, 200, 32, self.fonts["SMALL"], "1") # Adjust Y for description field
         # Pre-fill with developer/games/ path (relative from project root)
-        self.ui_elements["file_path_input"] = TextInput(300, 400, 400, 32, self.fonts["SMALL"], "developer/games/") # File path input
+        self.ui_elements["file_path_input"] = TextInput(300, 400, 400, 32, self.fonts["TINY"], "developer/games/") # File path input
         self.ui_elements["upload_btn"] = Button(350, 450, 200, 50, self.fonts["MEDIUM"], "Upload")
         
         # List of focusable elements on upload screen (in tab order)
@@ -353,7 +353,7 @@ class DeveloperGUI(BaseGUI):
         if os.path.isabs(file_path_str):
             if os.path.exists(file_path_str):
                 return file_path_str
-            return None
+            return Noneo
         
         # Try as relative path from project root
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

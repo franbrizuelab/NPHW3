@@ -791,24 +791,49 @@ def handle_invite(client_sock: socket.socket, inviter_username: str, data: dict)
 def handle_game_over(room_id: int):
     """
     Deletes a room and sets its players to online status after a game.
+    This function MUST reset player statuses to "online" and delete the room.
     """
-    with g_session_lock, g_room_lock:
+    player_list = []
+    
+    # Step 1: Get player list from room BEFORE deleting it
+    with g_room_lock:
         room = g_rooms.get(room_id)
-        if not room or room["status"] != "playing":
-            return # Nothing to do
-
-        logging.info(f"Game over for room {room_id}. Deleting room.")
-        player_list = list(room["players"]) # Copy for safe iteration
-        del g_rooms[room_id]
-
-        # Update player statuses
+        if room:
+            player_list = list(room["players"])  # Copy for safe iteration
+            logging.info(f"Game over for room {room_id}. Found {len(player_list)} players: {player_list}")
+        else:
+            logging.warning(f"handle_game_over: Room {room_id} not found in g_rooms")
+    
+    # Step 2: If room not found, search for players with "playing" status as fallback
+    if not player_list:
+        with g_session_lock:
+            for username, session in g_client_sessions.items():
+                if session.get("status") == "playing":
+                    player_list.append(username)
+                    logging.info(f"Found player {username} with 'playing' status, will reset to 'online'")
+    
+    # Step 3: Reset ALL player statuses to "online" - CRITICAL for allowing new room creation
+    with g_session_lock:
         for username in player_list:
             session = g_client_sessions.get(username)
             if session:
-                session["status"] = "online" # Back to being online
+                old_status = session.get("status", "unknown")
+                session["status"] = "online"
+                logging.info(f"Reset {username} status from '{old_status}' to 'online'")
+            else:
+                logging.warning(f"handle_game_over: Session not found for {username}")
+    
+    # Step 4: Delete the room - MUST be done after getting player list
+    with g_room_lock:
+        if room_id in g_rooms:
+            del g_rooms[room_id]
+            logging.info(f"Deleted room {room_id}")
+        else:
+            logging.warning(f"Room {room_id} was already deleted (may have been cleaned up elsewhere)")
 
-        # Broadcast the changes to all clients
-        public_rooms = []
+    # Broadcast the changes to all clients
+    public_rooms = []
+    with g_room_lock:
         for rid, room_data in g_rooms.items():
             if room_data["status"] == "idle" and room_data.get("is_public", True): # Only show public, idle rooms
                 public_rooms.append({
@@ -819,15 +844,21 @@ def handle_game_over(room_id: int):
                     "game_id": room_data.get("game_id"),
                     "game_name": room_data.get("game_name")
                 })
-        user_list = []
+    
+    user_list = []
+    with g_session_lock:
         user_list = [
             {"username": user, "status": data["status"]}
             for user, data in g_client_sessions.items()
         ]
-
+        
+        # Send updates to all connected clients
         for session in g_client_sessions.values():
-            send_to_client(session["sock"], {"status": "ok", "rooms": public_rooms})
-            send_to_client(session["sock"], {"status": "ok", "users": user_list})
+            try:
+                send_to_client(session["sock"], {"status": "ok", "rooms": public_rooms})
+                send_to_client(session["sock"], {"status": "ok", "users": user_list})
+            except Exception as e:
+                logging.warning(f"Failed to send game_over update to client: {e}")
 
 # Client Handling Thread
 
@@ -862,7 +893,7 @@ def handle_client(client_sock: socket.socket, addr: tuple):
 
             # 3. Process the action
             
-            # System actions allowed without login (game server notifications)
+            # System actions allowed without login (game server notifications, admin tools)
             if action == 'game_over':
                 room_id = data.get('room_id')
                 if room_id is not None:
@@ -870,6 +901,34 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                     send_to_client(client_sock, {"status": "ok", "reason": "game_over_processed"})
                 else:
                     send_to_client(client_sock, {"status": "error", "reason": "missing_room_id"})
+                continue
+            
+            if action == 'reset_all_sessions':
+                # Admin action to reset all user sessions (useful for recovery)
+                # This action does NOT require login
+                logging.info(f"Received reset_all_sessions request from {addr}")
+                with g_session_lock:
+                    reset_count = 0
+                    for username, session in g_client_sessions.items():
+                        old_status = session.get("status", "unknown")
+                        if old_status != "online":
+                            session["status"] = "online"
+                            reset_count += 1
+                            logging.info(f"Reset {username} status from '{old_status}' to 'online'")
+                    
+                    # Also clear all rooms
+                    with g_room_lock:
+                        room_count = len(g_rooms)
+                        g_rooms.clear()
+                        logging.info(f"Cleared {room_count} rooms")
+                    
+                    send_to_client(client_sock, {
+                        "status": "ok", 
+                        "reason": f"reset_all_sessions",
+                        "users_reset": reset_count,
+                        "rooms_cleared": room_count
+                    })
+                    logging.info(f"Admin action: Reset {reset_count} user sessions and cleared {room_count} rooms")
                 continue
             
             # Actions allowed BEFORE login

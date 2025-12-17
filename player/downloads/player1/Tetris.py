@@ -483,6 +483,29 @@ def handle_game_end(clients: list, game_p1: TetrisGame, game_p2: TetrisGame, win
                 protocol.send_msg(sock, json.dumps(game_over_msg).encode('utf-8'))
     except Exception as e:
         logging.warning(f"Failed to send GAME_OVER message: {e}")
+    
+    # 4. Notify the lobby server that the game is over
+    try:
+        lobby_request = {
+            "action": "game_over",
+            "data": {"room_id": room_id}
+        }
+        # Connect to lobby server to notify it
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as lobby_sock:
+            lobby_sock.settimeout(5.0)
+            lobby_sock.connect((config.LOBBY_HOST, config.LOBBY_PORT))
+            request_bytes = json.dumps(lobby_request).encode('utf-8')
+            protocol.send_msg(lobby_sock, request_bytes)
+            # Wait for response (optional, but good practice)
+            response_bytes = protocol.recv_msg(lobby_sock)
+            if response_bytes:
+                response = json.loads(response_bytes.decode('utf-8'))
+                if response.get("status") == "ok":
+                    logging.info(f"Lobby server notified of game end for room {room_id}.")
+                else:
+                    logging.warning(f"Lobby server response: {response}")
+    except Exception as e:
+        logging.error(f"Failed to notify lobby server of game end: {e}")
 
 def game_loop(clients: list, input_queue: queue.Queue, game_p1: TetrisGame, game_p2: TetrisGame, 
               p1_user: str, p2_user: str, room_id: int):
@@ -768,7 +791,9 @@ def run_game_client(game_host: str, game_port: int, room_id: int = None):
                             last_game_state = snapshot
                         elif msg_type == "GAME_OVER":
                             game_over_results = snapshot
+                            logging.info(f"Received GAME_OVER: {snapshot}")
                             # Don't break - keep thread running to handle cleanup
+                            # The main loop will handle displaying the game over screen
                     
                     # Send messages
                     try:
@@ -818,11 +843,10 @@ def run_game_client(game_host: str, game_port: int, room_id: int = None):
                         elif event.key == pygame.K_SPACE:
                             game_send_queue.put({"type": "INPUT", "action": "HARD_DROP"})
                         elif event.key == pygame.K_ESCAPE:
-                            # Send FORFEIT and notify lobby server
+                            # Send FORFEIT - don't exit yet, wait for GAME_OVER from server
                             game_send_queue.put({"type": "FORFEIT"})
-                            # Notify lobby server that player is leaving
-                            _notify_lobby_leave_room(room_id)
-                            running = False
+                            # The game server will process FORFEIT, determine winner, 
+                            # send GAME_OVER to both players, and notify the lobby server
                 
                 if game_over_results and user_acknowledged_game_over:
                     if ui_elements["back_to_lobby_btn"].handle_event(event):
