@@ -553,6 +553,8 @@ def handle_start_game(client_sock: socket.socket, username: str):
             return
 
         # 2. Lock g_room_lock to check room status
+        game_id = None
+        game_name = None
         with g_room_lock:
             room = g_rooms.get(room_id)
             if room is None:
@@ -570,6 +572,8 @@ def handle_start_game(client_sock: socket.socket, username: str):
             
             player1_name = room["players"][0]
             player2_name = room["players"][1]
+            game_id = room.get("game_id")  # Capture before releasing lock
+            game_name = room.get("game_name")  # Capture before releasing lock
             
             # Update both players' session status
             p1_session = g_client_sessions.get(player1_name)
@@ -586,9 +590,58 @@ def handle_start_game(client_sock: socket.socket, username: str):
     try:
         game_port = find_free_port(config.GAME_SERVER_START_PORT)
         
-        # Get the path to game_server.py (in server/ directory)
-        server_dir = os.path.dirname(os.path.abspath(__file__))
-        game_server_path = os.path.join(server_dir, "game_server.py")
+        # Determine which game file to launch
+        game_server_path = None
+        
+        if game_id:
+            # Launch game from storage based on game_id
+            # Get game info to find the current version
+            db_request = {
+                "collection": "Game",
+                "action": "query",
+                "data": {"game_id": game_id}
+            }
+            db_response = forward_to_db(db_request)
+            
+            if db_response and db_response.get("status") == "ok":
+                game = db_response.get("game", {})
+                current_version = game.get("current_version", "1.0.0")
+                
+                # Get version info to find file path
+                db_version_request = {
+                    "collection": "GameVersion",
+                    "action": "query",
+                    "data": {"game_id": game_id, "version": current_version}
+                }
+                db_version_response = forward_to_db(db_version_request)
+                
+                if db_version_response and db_version_response.get("status") == "ok":
+                    version_info = db_version_response.get("version", {})
+                    file_path = version_info.get("file_path")
+                    
+                    # Resolve path relative to project root
+                    if file_path:
+                        if not os.path.isabs(file_path):
+                            # Relative path - resolve from project root
+                            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                            file_path = os.path.join(project_root, file_path)
+                        
+                        # Check if file exists
+                        if os.path.exists(file_path):
+                            game_server_path = file_path
+                            logging.info(f"Found game file for game_id {game_id}: {file_path}")
+                        else:
+                            logging.warning(f"Game file not found at {file_path}, falling back to default")
+                else:
+                    logging.warning(f"Version info not found for game {game_id}, falling back to default")
+            else:
+                logging.warning(f"Game {game_id} not found in DB, falling back to default")
+        
+        # Fallback to default game_server.py if no game_id or file not found
+        if not game_server_path:
+            server_dir = os.path.dirname(os.path.abspath(__file__))
+            game_server_path = os.path.join(server_dir, "game_server.py")
+            logging.info(f"Using default game server: {game_server_path}")
         
         command = [
             "python3", game_server_path, 
@@ -599,7 +652,8 @@ def handle_start_game(client_sock: socket.socket, username: str):
         ]
         subprocess.Popen(command)
         
-        logging.info(f"Launched GameServer for {player1_name} and {player2_name} on port {game_port}")
+        display_name = game_name or "Unknown Game"
+        logging.info(f"Launched {display_name} (game_id: {game_id}) for {player1_name} and {player2_name} on port {game_port}")
         
         time.sleep(0.5) # Sleep before telling clients
 
