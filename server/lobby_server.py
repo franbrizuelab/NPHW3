@@ -828,6 +828,16 @@ def handle_client(client_sock: socket.socket, addr: tuple):
 
             # 3. Process the action
             
+            # System actions allowed without login (game server notifications)
+            if action == 'game_over':
+                room_id = data.get('room_id')
+                if room_id is not None:
+                    handle_game_over(room_id)
+                    send_to_client(client_sock, {"status": "ok", "reason": "game_over_processed"})
+                else:
+                    send_to_client(client_sock, {"status": "error", "reason": "missing_room_id"})
+                continue
+            
             # Actions allowed BEFORE login
             if username is None:
                 if action == 'register':
@@ -876,11 +886,6 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 elif action == 'invite':
                     handle_invite(client_sock, username, data)
                 
-                elif action == 'game_over':
-                    room_id = data.get('room_id')
-                    if room_id is not None:
-                        handle_game_over(room_id)
-
                 elif action == 'query_gamelogs':
                     logging.info(f"Received query_gamelogs request from {username}")
                     db_request = {

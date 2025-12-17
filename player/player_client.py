@@ -7,6 +7,11 @@ import base64
 import argparse
 import time
 import threading
+import socket
+import select
+import queue
+import json
+import pygame
 
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,7 +20,8 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from gui.base_gui import BaseGUI, draw_text, Button, TextInput, BASE_CONFIG
-from client.shared import send_to_lobby_queue
+from client.shared import send_to_lobby_queue, g_lobby_send_queue
+from common import protocol
 
 # Predefined users for auto-login
 PLAYER_USERS = {
@@ -51,7 +57,60 @@ class PlayerGUI(BaseGUI):
         self.current_room_id = None  # Current room ID if in a room
         self.current_room_data = {}  # Current room data (players, host, etc.)
         self.room_join_buttons = {}  # Maps room_id to join button
+        
+        # Invitation popup state
+        self.pending_invite = None  # Stores invite data: {"from_user": str, "room_id": int, "game_name": str}
+        self.invite_accept_btn = None
+        self.invite_decline_btn = None
 
+    def _lobby_network_thread(self):
+        """Override base network thread to handle disconnections gracefully."""
+        host, port = BASE_CONFIG["NETWORK"]["HOST"], BASE_CONFIG["NETWORK"]["PORT"]
+        while self.running:
+            if not self.lobby_socket:
+                try:
+                    logging.info(f"Connecting to lobby at {host}:{port}...")
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.connect((host, port))
+                    self.lobby_socket = sock
+                    logging.info("Connection successful.")
+                    with self.state_lock:
+                        if self.client_state == "CONNECTING": self.client_state = "LOGIN"
+                except socket.error:
+                    with self.state_lock:
+                        if self.client_state == "CONNECTING": self.client_state = "ERROR"; self.error_message = "Lobby is offline."
+                    time.sleep(2)
+                    continue
+            try:
+                readable, _, exceptional = select.select([self.lobby_socket], [], [self.lobby_socket], 0.1)
+                if exceptional: raise ConnectionError("Socket exceptional condition")
+                if self.lobby_socket in readable:
+                    data_bytes = protocol.recv_msg(self.lobby_socket)
+                    if data_bytes is None: raise ConnectionError("Server closed connection")
+                    self.handle_network_message(json.loads(data_bytes.decode('utf-8')))
+                while not g_lobby_send_queue.empty():
+                    request = g_lobby_send_queue.get_nowait()
+                    protocol.send_msg(self.lobby_socket, json.dumps(request).encode('utf-8'))
+                    if request.get("action") == "logout": raise ConnectionError("Logout initiated")
+            except (ConnectionError, socket.error, json.JSONDecodeError, queue.Empty) as e:
+                logging.warning(f"Network event: {e}")
+                if self.lobby_socket: self.lobby_socket.close()
+                self.lobby_socket = None
+                with self.state_lock:
+                    if self.client_state == "LOGGING_OUT": 
+                        self.client_state = "LOGIN"
+                        self.username = None
+                    else:
+                        # If we were in a room, return to lobby gracefully
+                        if self.client_state in ["ROOM_WAITING"]:
+                            self.current_room_id = None
+                            self.current_room_data = {}
+                            self.client_state = "LOBBY_MENU"
+                            self.error_message = "Connection lost. Returned to lobby."
+                        else:
+                            self.client_state = "ERROR"
+                            self.error_message = "Connection lost"
+    
     def _start_network_thread(self):
         super()._start_network_thread()
         
@@ -100,6 +159,10 @@ class PlayerGUI(BaseGUI):
             self.draw_my_games_menu(screen)
         elif state == "ROOM_WAITING":
             self.draw_room_waiting_screen(screen)
+        
+        # Draw invitation popup if there's a pending invite (draws on top of everything)
+        if self.pending_invite:
+            self.draw_invite_popup(screen)
 
     def handle_custom_events(self, event, state):
         if state == "LOBBY_MENU":
@@ -192,6 +255,22 @@ class PlayerGUI(BaseGUI):
                     if current_time - self.last_users_refresh > 5:  # Refresh every 5 seconds
                         send_to_lobby_queue({"action": "list_users"})
                         self.last_users_refresh = current_time
+        
+        # Handle invitation popup (works in any state)
+        if self.pending_invite:
+            if self.invite_accept_btn and self.invite_accept_btn.handle_event(event):
+                # Accept invitation - join the room
+                room_id = self.pending_invite['room_id']
+                self.pending_invite = None  # Close popup
+                send_to_lobby_queue({
+                    "action": "join_room",
+                    "data": {"room_id": room_id}
+                })
+                logging.info(f"Accepted invitation to room {room_id}")
+            elif self.invite_decline_btn and self.invite_decline_btn.handle_event(event):
+                # Decline invitation
+                self.pending_invite = None  # Close popup
+                logging.info("Declined invitation")
 
     def handle_network_message(self, msg):
         """Handles player-specific network messages."""
@@ -278,6 +357,43 @@ class PlayerGUI(BaseGUI):
             with self.state_lock:
                 self.client_state = "MY_GAMES_MENU"
         
+        elif msg.get("type") == "INVITE_RECEIVED":
+            # Received an invitation
+            self.pending_invite = {
+                "from_user": msg.get("from_user"),
+                "room_id": msg.get("room_id"),
+                "game_name": msg.get("game_name", "Unknown Game")
+            }
+            logging.info(f"Received invitation from {self.pending_invite['from_user']} for room {self.pending_invite['room_id']}")
+            # Create buttons if they don't exist
+            if not self.invite_accept_btn:
+                self.invite_accept_btn = Button(300, 350, 140, 40, self.fonts["SMALL"], "Accept")
+            if not self.invite_decline_btn:
+                self.invite_decline_btn = Button(460, 350, 140, 40, self.fonts["SMALL"], "Decline")
+        
+        elif msg.get("type") == "GAME_OVER":
+            # Game ended - return to lobby
+            winner = msg.get('winner', 'Unknown')
+            reason = msg.get('reason', 'unknown')
+            logging.info(f"Game over: {winner} won (reason: {reason})")
+            
+            # Notify lobby server that game is over (if room_id is available)
+            room_id = msg.get("room_id")
+            if room_id:
+                send_to_lobby_queue({
+                    "action": "game_over",
+                    "data": {"room_id": room_id}
+                })
+            
+            # Reset room state
+            self.current_room_id = None
+            self.current_room_data = {}
+            with self.state_lock:
+                self.client_state = "LOBBY_MENU"
+            # Request updated rooms and users list
+            send_to_lobby_queue({"action": "list_rooms"})
+            send_to_lobby_queue({"action": "list_users"})
+        
         elif status == "ok" and "rooms" in msg:
             # Received rooms list from server
             self.game_rooms = msg.get("rooms", [])
@@ -292,7 +408,8 @@ class PlayerGUI(BaseGUI):
             # Update room status to playing (room stays open)
             if self.current_room_data:
                 self.current_room_data["status"] = "playing"
-            # TODO: Connect to game server (will be handled later)
+            # Note: The actual game connection will be handled by the game client
+            # For now, we just update the room status to show "playing"
             # For now, stay in ROOM_WAITING screen but show game is running
         
         else:
@@ -624,7 +741,7 @@ class PlayerGUI(BaseGUI):
         room_status = self.current_room_data.get("status", "idle")
         
         # Room title
-        draw_text(screen, f"Room: {room_name}", 50, 50, self.fonts["TITLE"], (255, 255, 255))
+        draw_text(screen, f"{room_name}", 50, 50, self.fonts["MEDIUM"], (255, 255, 255))
         draw_text(screen, f"Game: {game_name}", 50, 90, self.fonts["MEDIUM"], (200, 200, 200))
         draw_text(screen, f"Type: {room_type}", 50, 120, self.fonts["SMALL"], (150, 150, 150))
         
@@ -697,6 +814,54 @@ class PlayerGUI(BaseGUI):
             # Game is playing
             draw_text(screen, "Game is running...", 50, 310, self.fonts["MEDIUM"], (0, 255, 0))
             draw_text(screen, "Room remains open until game ends", 50, 350, self.fonts["SMALL"], (150, 150, 150))
+    
+    def draw_invite_popup(self, screen):
+        """Draws the invitation popup overlay."""
+        if not self.pending_invite:
+            return
+        
+        # Semi-transparent overlay
+        overlay = pygame.Surface((BASE_CONFIG["SCREEN"]["WIDTH"], BASE_CONFIG["SCREEN"]["HEIGHT"]))
+        overlay.set_alpha(200)
+        overlay.fill((0, 0, 0))
+        screen.blit(overlay, (0, 0))
+        
+        # Popup box
+        popup_rect = pygame.Rect(200, 250, 500, 200)
+        pygame.draw.rect(screen, (40, 40, 50), popup_rect, 0, border_radius=10)
+        pygame.draw.rect(screen, (255, 255, 255), popup_rect, 2, border_radius=10)
+        
+        # Invitation text
+        from_user = self.pending_invite.get("from_user", "Unknown")
+        game_name = self.pending_invite.get("game_name", "Unknown Game")
+        inv_text = f"{from_user} invited you to play {game_name}!"
+        
+        # Wrap text if needed
+        words = inv_text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            test_line = current_line + (" " if current_line else "") + word
+            if self.fonts["MEDIUM"].size(test_line)[0] < 460:
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+        
+        # Draw text lines
+        y_offset = 280
+        for line in lines:
+            draw_text(screen, line, 230, y_offset, self.fonts["MEDIUM"], (255, 255, 255))
+            y_offset += 30
+        
+        # Draw buttons
+        if self.invite_accept_btn:
+            self.invite_accept_btn.draw(screen)
+        if self.invite_decline_btn:
+            self.invite_decline_btn.draw(screen)
 
     def _attempt_registration(self):
         # Players should not register as developers

@@ -180,6 +180,28 @@ def handle_game_end(clients: list, game_p1: TetrisGame, game_p2: TetrisGame, win
                 protocol.send_msg(sock, json.dumps(game_over_msg).encode('utf-8'))
     except Exception as e:
         logging.warning(f"Failed to send GAME_OVER message: {e}")
+    
+    # 4. Notify the lobby server that the game is over
+    try:
+        lobby_request = {
+            "action": "game_over",
+            "data": {"room_id": room_id}
+        }
+        # Connect to lobby server to notify it
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as lobby_sock:
+            lobby_sock.connect((config.LOBBY_HOST, config.LOBBY_PORT))
+            request_bytes = json.dumps(lobby_request).encode('utf-8')
+            protocol.send_msg(lobby_sock, request_bytes)
+            # Wait for response (optional, but good practice)
+            response_bytes = protocol.recv_msg(lobby_sock)
+            if response_bytes:
+                response = json.loads(response_bytes.decode('utf-8'))
+                if response.get("status") == "ok":
+                    logging.info("Lobby server notified of game end.")
+                else:
+                    logging.warning(f"Lobby server response: {response}")
+    except Exception as e:
+        logging.error(f"Failed to notify lobby server of game end: {e}")
 
 
 

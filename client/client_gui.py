@@ -798,7 +798,7 @@ def draw_room_screen(screen, fonts, ui_elements):
         players = g_room_data.get("players", [])
         host = g_room_data.get("host")
         
-    draw_text(screen, f"Room: {room_name}", 50, 20, fonts["LARGE"], CONFIG["COLORS"]["TEXT"])
+    draw_text(screen, f"{room_name}", 50, 20, fonts["MEDIUM"], CONFIG["COLORS"]["TEXT"])
     
     draw_text(screen, "Players:", 50, 100, fonts["MEDIUM"], CONFIG["COLORS"]["TEXT"])
     for i, player in enumerate(players):
