@@ -183,6 +183,13 @@ class DeveloperGUI(BaseGUI):
         self.error_message_timer = 0
 
     def draw_custom_state(self, screen, state):
+        # Draw username in upper center for all states
+        if self.username:
+            username_text = self.username
+            text_width = self.fonts["SMALL"].size(username_text)[0]
+            center_x = BASE_CONFIG["SCREEN"]["WIDTH"] // 2
+            draw_text(screen, username_text, center_x - text_width // 2, 10, self.fonts["SMALL"], (200, 200, 200))
+        
         if state == "MY_GAMES_MENU":
             self.draw_my_games_menu(screen)
         elif state == "UPLOAD_GAME":
@@ -264,10 +271,10 @@ class DeveloperGUI(BaseGUI):
         draw_text(screen, "My Games", 350, 50, self.fonts["TITLE"], (255, 255, 255))
         self.ui_elements["add_game_btn"].draw(screen)
 
-        # Headers
-        draw_text(screen, "ID", 50, 150, self.fonts["MEDIUM"], (200, 200, 200))
-        draw_text(screen, "Name", 150, 150, self.fonts["MEDIUM"], (200, 200, 200))
-        draw_text(screen, "Version", 450, 150, self.fonts["MEDIUM"], (200, 200, 200))
+        # Headers - use TINY font (smaller than content)
+        draw_text(screen, "ID", 50, 150, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, "Name", 150, 150, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, "Version", 450, 150, self.fonts["TINY"], (200, 200, 200))
 
         for i, game in enumerate(self.my_games):
             y_pos = 200 + i * 50

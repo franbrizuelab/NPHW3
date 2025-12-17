@@ -14,7 +14,7 @@ project_root = os.path.dirname(current_dir) # Go up one level
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from gui.base_gui import BaseGUI, draw_text, Button, TextInput
+from gui.base_gui import BaseGUI, draw_text, Button, TextInput, BASE_CONFIG
 from client.shared import send_to_lobby_queue
 
 # Predefined users for auto-login
@@ -39,6 +39,13 @@ class PlayerGUI(BaseGUI):
         self.version_check_interval = 30  # seconds
         self.last_version_check = 0
         self.downloaded_versions = {}  # Maps game_id to {"version": str, "downloaded_at": float}
+        
+        # Room creation state
+        self.room_is_public = True  # Default to public rooms
+        self.online_users = []  # List of online users for invitations
+        self.invite_buttons = {}  # Maps username to invite button
+        self.room_toggle_buttons = {}  # Maps game_id to toggle button
+        self.current_room_game_id = None  # Track which game we're creating room for
 
     def _start_network_thread(self):
         super()._start_network_thread()
@@ -73,12 +80,21 @@ class PlayerGUI(BaseGUI):
         self.ui_elements["my_games_btn"] = Button(170, 10, 150, 40, self.fonts["SMALL"], "My Games")
 
     def draw_custom_state(self, screen, state):
+        # Draw username in upper center for all states
+        if self.username:
+            username_text = self.username
+            text_width = self.fonts["SMALL"].size(username_text)[0]
+            center_x = BASE_CONFIG["SCREEN"]["WIDTH"] // 2
+            draw_text(screen, username_text, center_x - text_width // 2, 10, self.fonts["SMALL"], (200, 200, 200))
+        
         if state == "LOBBY_MENU":
             self.draw_lobby_menu(screen)
         elif state == "STORE_MENU":
             self.draw_store_menu(screen)
         elif state == "MY_GAMES_MENU":
             self.draw_my_games_menu(screen)
+        elif state == "ROOM_CREATE":
+            self.draw_room_create_screen(screen)
 
     def handle_custom_events(self, event, state):
         if state == "LOBBY_MENU":
@@ -102,19 +118,52 @@ class PlayerGUI(BaseGUI):
                     })
                     logging.info(f"Requested download for game {game_id}")
         elif state == "MY_GAMES_MENU":
+            # Periodic version checking
+            current_time = time.time()
+            if current_time - self.last_version_check > self.version_check_interval:
+                send_to_lobby_queue({"action": "list_games"})
+                self.last_version_check = current_time
+            
             # Handle create room button clicks
             for game_id, btn in self.create_room_buttons.items():
                 if btn.handle_event(event):
-                    # Create room for this game
+                    # Request online users list and show room creation screen
+                    send_to_lobby_queue({"action": "list_users"})
+                    self.current_room_game_id = game_id
+                    with self.state_lock:
+                        self.client_state = "ROOM_CREATE"
+                    logging.info(f"Preparing to create room for game {game_id}")
+            
+            # Handle private/public toggle button clicks
+            for game_id, toggle_btn in self.room_toggle_buttons.items():
+                if toggle_btn.handle_event(event):
+                    # Toggle room privacy state
+                    self.room_is_public = not self.room_is_public
+                    logging.info(f"Room privacy toggled to: {'Public' if self.room_is_public else 'Private'}")
+        
+        elif state == "ROOM_CREATE":
+            # Handle invite button clicks
+            for username, invite_btn in self.invite_buttons.items():
+                if invite_btn.handle_event(event):
+                    # Send invitation (will implement later)
+                    logging.info(f"Inviting {username} to room")
+                    # TODO: Send invite action to server
+            
+            # Handle create room final button
+            if hasattr(self, 'create_room_final_btn') and self.create_room_final_btn.handle_event(event):
+                # Create the room
+                if hasattr(self, 'current_room_game_id') and self.current_room_game_id:
                     send_to_lobby_queue({
                         "action": "create_room",
                         "data": {
-                            "game_id": game_id,
-                            "is_public": True,  # Default to public, can be made configurable
-                            "name": f"{self.username}'s {self._get_game_name(game_id)} Room"
+                            "game_id": self.current_room_game_id,
+                            "is_public": self.room_is_public,
+                            "name": f"{self.username}'s {self._get_game_name(self.current_room_game_id)} Room"
                         }
                     })
-                    logging.info(f"Creating room for game {game_id}")
+                    # Return to my games menu
+                    with self.state_lock:
+                        self.client_state = "MY_GAMES_MENU"
 
     def handle_network_message(self, msg):
         """Handles player-specific network messages."""
@@ -146,6 +195,13 @@ class PlayerGUI(BaseGUI):
                 if self.client_state in ["STORE_MENU", "MY_GAMES_MENU"]:
                     # State is already correct, just need to redraw
                     pass
+        
+        elif status == "ok" and "users" in msg:
+            # Received users list from server (response to list_users action)
+            users = msg.get("users", [])
+            # Filter to only online users
+            self.online_users = [u for u in users if u.get("status") == "online" and u.get("username") != self.username]
+            logging.info(f"Received {len(self.online_users)} online users for invitations")
         
         elif status == "ok" and msg.get("action") == "download_game":
             # Game download response
@@ -210,7 +266,9 @@ class PlayerGUI(BaseGUI):
     def handle_back_button(self, current_state):
         """Custom back button behavior for the player client."""
         with self.state_lock:
-            if current_state in ["STORE_MENU", "MY_GAMES_MENU"]:
+            if current_state == "ROOM_CREATE":
+                self.client_state = "MY_GAMES_MENU"
+            elif current_state in ["STORE_MENU", "MY_GAMES_MENU"]:
                 self.client_state = "LOBBY_MENU"
             else:
                 super().handle_back_button(current_state)
@@ -334,12 +392,11 @@ class PlayerGUI(BaseGUI):
         """Helper to draw a table of games."""
         draw_text(screen, title, 350, 50, self.fonts["TITLE"], (255, 255, 255))
         
-        # Headers
-        draw_text(screen, "Name", 50, 150, self.fonts["MEDIUM"], (200, 200, 200))
-        draw_text(screen, "Version", 350, 150, self.fonts["MEDIUM"], (200, 200, 200))
-        draw_text(screen, "Description", 500, 150, self.fonts["MEDIUM"], (200, 200, 200))
+        # Headers - use TINY font (smaller than content)
+        draw_text(screen, "Name", 50, 150, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, "Description", 500, 150, self.fonts["TINY"], (200, 200, 200))
         if show_download_btn or show_create_room_btn:
-            draw_text(screen, "Action", 750, 150, self.fonts["MEDIUM"], (200, 200, 200))
+            draw_text(screen, "Action", 750, 150, self.fonts["TINY"], (200, 200, 200))
 
         if not games:
             draw_text(screen, "No games to display.", 50, 220, self.fonts["MEDIUM"], (200, 200, 200))
@@ -352,9 +409,12 @@ class PlayerGUI(BaseGUI):
             y_pos = 200 + i * 40
             game_id = game.get('id')
             game_name = str(game.get('name', 'N/A'))
+            version = str(game.get('current_version', 'N/A'))
             
-            draw_text(screen, game_name, 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
-            draw_text(screen, str(game.get('current_version', 'N/A')), 350, y_pos, self.fonts["SMALL"], (255, 255, 255))
+            # Combine game name with version
+            game_name_with_version = f"{game_name} v{version}"
+            draw_text(screen, game_name_with_version, 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
+            
             # Truncate long descriptions
             desc = str(game.get('description', 'N/A'))
             if len(desc) > 30:
@@ -390,9 +450,18 @@ class PlayerGUI(BaseGUI):
             # Create room button for my games
             if show_create_room_btn and game_id:
                 if game_id not in self.create_room_buttons:
-                    self.create_room_buttons[game_id] = Button(750, y_pos - 5, 100, 30, self.fonts["SMALL"], "Create Room")
+                    # "New Room" button with smaller font
+                    self.create_room_buttons[game_id] = Button(750, y_pos - 5, 80, 30, self.fonts["TINY"], "New Room")
+                    # Private/Public toggle button
+                    self.room_toggle_buttons[game_id] = Button(840, y_pos - 5, 60, 30, self.fonts["TINY"], "Public")
                 btn = self.create_room_buttons[game_id]
                 btn.draw(screen)
+                # Draw toggle button
+                toggle_btn = self.room_toggle_buttons.get(game_id)
+                if toggle_btn:
+                    # Update button text based on state
+                    toggle_btn.text = "Public" if self.room_is_public else "Private"
+                    toggle_btn.draw(screen)
 
     def draw_store_menu(self, screen):
         logging.debug(f"draw_store_menu: all_games has {len(self.all_games)} games")
@@ -401,6 +470,48 @@ class PlayerGUI(BaseGUI):
     def draw_my_games_menu(self, screen):
         logging.debug(f"draw_my_games_menu: my_games has {len(self.my_games)} games")
         self._draw_game_table(screen, self.my_games, "My Games", show_create_room_btn=True)
+    
+    def draw_room_create_screen(self, screen):
+        """Draw the room creation screen with online users list."""
+        draw_text(screen, "Create Room", 350, 50, self.fonts["TITLE"], (255, 255, 255))
+        
+        # Show game name
+        if hasattr(self, 'current_room_game_id') and self.current_room_game_id:
+            game_name = self._get_game_name(self.current_room_game_id)
+            draw_text(screen, f"Game: {game_name}", 50, 100, self.fonts["MEDIUM"], (255, 255, 255))
+        else:
+            draw_text(screen, "Game: Unknown", 50, 100, self.fonts["MEDIUM"], (255, 255, 255))
+        
+        # Show room type
+        room_type = "Public" if self.room_is_public else "Private"
+        draw_text(screen, f"Room Type: {room_type}", 50, 130, self.fonts["SMALL"], (200, 200, 200))
+        
+        # Online users list header
+        draw_text(screen, "Online Users (Click to Invite):", 50, 180, self.fonts["MEDIUM"], (200, 200, 200))
+        
+        # Draw online users list
+        self.invite_buttons = {}
+        if not self.online_users:
+            draw_text(screen, "No other users online.", 50, 220, self.fonts["SMALL"], (150, 150, 150))
+        else:
+            for i, user in enumerate(self.online_users):
+                y_pos = 220 + i * 40
+                username = user.get("username", "Unknown")
+                status = user.get("status", "unknown")
+                
+                # Create invite button for each user
+                if username not in self.invite_buttons:
+                    self.invite_buttons[username] = Button(50, y_pos - 5, 300, 35, self.fonts["SMALL"], f"Invite {username}")
+                btn = self.invite_buttons[username]
+                btn.draw(screen)
+                
+                # Show user status
+                draw_text(screen, f"({status})", 360, y_pos, self.fonts["TINY"], (150, 150, 150))
+        
+        # Create room button (without invitation for now)
+        if not hasattr(self, 'create_room_final_btn'):
+            self.create_room_final_btn = Button(50, 500, 200, 40, self.fonts["MEDIUM"], "Create Room")
+        self.create_room_final_btn.draw(screen)
 
     def _attempt_registration(self):
         # Players should not register as developers
