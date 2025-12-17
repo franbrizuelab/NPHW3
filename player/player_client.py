@@ -34,6 +34,11 @@ class PlayerGUI(BaseGUI):
         self.create_room_buttons = {}  # Maps game_id to Button object
         self.auto_login_user = auto_login_user  # User credentials for auto-login
         self.auto_login_sent = False  # Track if auto-login has been sent
+        
+        # Version checking and tracking
+        self.version_check_interval = 30  # seconds
+        self.last_version_check = 0
+        self.downloaded_versions = {}  # Maps game_id to {"version": str, "downloaded_at": float}
 
     def _start_network_thread(self):
         super()._start_network_thread()
@@ -130,7 +135,10 @@ class PlayerGUI(BaseGUI):
         
         elif status == "ok" and msg.get("action") == "list_games":
             # Received games list from server
-            self.all_games = msg.get("games", [])
+            games = msg.get("games", [])
+            # Compare versions and mark updates
+            self._compare_versions(games)
+            self.all_games = games
             self._update_download_buttons()
         
         elif status == "ok" and msg.get("action") == "download_game":
@@ -224,15 +232,28 @@ class PlayerGUI(BaseGUI):
         # Match with games from server to get full metadata
         for game in self.all_games:
             game_name = game.get("name", "")
+            game_id = game.get("id")
             if game_name in downloaded_files:
+                # Game is downloaded - check if we have version info
+                if game_id and game_id not in self.downloaded_versions:
+                    # Initialize version info if missing (for games downloaded before version tracking)
+                    self.downloaded_versions[game_id] = {
+                        "version": game.get("current_version", "1"),
+                        "downloaded_at": os.path.getmtime(downloaded_files[game_name])
+                    }
+                
                 # Game is downloaded
-                self.my_games.append({
-                    "id": game.get("id"),
+                game_data = {
+                    "id": game_id,
                     "name": game.get("name"),
-                    "current_version": game.get("current_version", "1.0.0"),
+                    "current_version": game.get("current_version", "1"),
                     "description": game.get("description", ""),
                     "author": game.get("author", "")
-                })
+                }
+                # Mark update available if needed
+                if self._is_update_available(game_id):
+                    game_data["update_available"] = True
+                self.my_games.append(game_data)
         
         # Also include any downloaded games not in server list (orphaned)
         for game_name, file_path in downloaded_files.items():
@@ -254,6 +275,35 @@ class PlayerGUI(BaseGUI):
             if game.get("id") == game_id:
                 return True
         return False
+    
+    def _is_update_available(self, game_id):
+        """Check if an update is available for a downloaded game."""
+        if game_id not in self.downloaded_versions:
+            return False
+        
+        # Find the game in all_games to get server version
+        for game in self.all_games:
+            if game.get("id") == game_id:
+                server_version = game.get("current_version")
+                local_version = self.downloaded_versions[game_id].get("version")
+                if local_version and server_version and server_version != local_version:
+                    return True
+                break
+        return False
+    
+    def _compare_versions(self, games):
+        """Compare server versions with local versions and mark updates."""
+        for game in games:
+            game_id = game.get("id")
+            if game_id in self.downloaded_versions:
+                server_version = game.get("current_version")
+                local_version = self.downloaded_versions[game_id].get("version")
+                if local_version and server_version and server_version != local_version:
+                    # Mark as update available
+                    game["update_available"] = True
+                    logging.info(f"Update available for game {game_id}: local={local_version}, server={server_version}")
+                else:
+                    game["update_available"] = False
     
     def _get_game_name(self, game_id):
         """Get game name by ID."""
@@ -305,11 +355,28 @@ class PlayerGUI(BaseGUI):
             # Download button for store
             if show_download_btn and game_id:
                 if game_id not in self.download_buttons:
-                    self.download_buttons[game_id] = Button(750, y_pos - 5, 100, 30, self.fonts["SMALL"], 
-                                                           "Download" if not self._is_game_downloaded(game_id) else "Downloaded")
+                    # Determine initial button text
+                    if self._is_update_available(game_id):
+                        btn_text = "Update"
+                    elif self._is_game_downloaded(game_id):
+                        btn_text = "Downloaded"
+                    else:
+                        btn_text = "Download"
+                    self.download_buttons[game_id] = Button(750, y_pos - 5, 100, 30, self.fonts["SMALL"], btn_text)
                 btn = self.download_buttons[game_id]
-                btn.text = "Downloaded" if self._is_game_downloaded(game_id) else "Download"
+                # Update button text based on current state
+                if self._is_update_available(game_id):
+                    btn.text = "Update"
+                elif self._is_game_downloaded(game_id):
+                    btn.text = "Downloaded"
+                else:
+                    btn.text = "Download"
                 btn.draw(screen)
+                
+                # Show visual indicator for update available (draw a small badge or different color)
+                if self._is_update_available(game_id):
+                    # Draw a small indicator next to version number
+                    draw_text(screen, "!", 330, y_pos, self.fonts["SMALL"], (255, 200, 0))  # Yellow exclamation mark
             
             # Create room button for my games
             if show_create_room_btn and game_id:
