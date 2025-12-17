@@ -133,13 +133,19 @@ class PlayerGUI(BaseGUI):
             # Request games list after login
             send_to_lobby_queue({"action": "list_games"})
         
-        elif status == "ok" and msg.get("action") == "list_games":
-            # Received games list from server
+        elif status == "ok" and "games" in msg:
+            # Received games list from server (response to list_games action)
             games = msg.get("games", [])
+            logging.info(f"Received {len(games)} games from server: {[g.get('name') for g in games]}")
             # Compare versions and mark updates
             self._compare_versions(games)
             self.all_games = games
             self._update_download_buttons()
+            # Force UI update by ensuring state is correct
+            with self.state_lock:
+                if self.client_state in ["STORE_MENU", "MY_GAMES_MENU"]:
+                    # State is already correct, just need to redraw
+                    pass
         
         elif status == "ok" and msg.get("action") == "download_game":
             # Game download response
@@ -337,7 +343,10 @@ class PlayerGUI(BaseGUI):
 
         if not games:
             draw_text(screen, "No games to display.", 50, 220, self.fonts["MEDIUM"], (200, 200, 200))
+            logging.debug(f"_draw_game_table: No games to display for {title}")
             return
+        
+        logging.debug(f"_draw_game_table: Drawing {len(games)} games for {title}")
             
         for i, game in enumerate(games):
             y_pos = 200 + i * 40
@@ -386,9 +395,11 @@ class PlayerGUI(BaseGUI):
                 btn.draw(screen)
 
     def draw_store_menu(self, screen):
+        logging.debug(f"draw_store_menu: all_games has {len(self.all_games)} games")
         self._draw_game_table(screen, self.all_games, "Game Store", show_download_btn=True)
         
     def draw_my_games_menu(self, screen):
+        logging.debug(f"draw_my_games_menu: my_games has {len(self.my_games)} games")
         self._draw_game_table(screen, self.my_games, "My Games", show_create_room_btn=True)
 
     def _attempt_registration(self):
