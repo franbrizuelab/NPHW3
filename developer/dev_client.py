@@ -2,6 +2,10 @@
 
 import sys
 import os
+import argparse
+import time
+import threading
+import logging
 
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -12,11 +16,16 @@ if project_root not in sys.path:
 from gui.base_gui import BaseGUI, draw_text, Button, TextInput
 from client.shared import send_to_lobby_queue
 
+# Predefined developer user for auto-login
+DEVELOPER_USER = {"user": "dev", "pass": "dev123"}
+
 class DeveloperGUI(BaseGUI):
-    def __init__(self):
+    def __init__(self, auto_login=False):
         super().__init__(title="Developer Client")
         self.is_developer = False
         self.my_games = []
+        self.auto_login = auto_login  # Flag for auto-login
+        self.auto_login_sent = False  # Track if auto-login has been sent
 
     # Override methods for developer-specific functionality
     def draw_custom_state(self, screen, state):
@@ -69,6 +78,33 @@ class DeveloperGUI(BaseGUI):
             with self.state_lock:
                 self.error_message = None
 
+    def _start_network_thread(self):
+        super()._start_network_thread()
+        
+        # If auto-login is enabled, wait for connection and send login
+        if self.auto_login:
+            def auto_login_thread():
+                # Wait for connection to be established
+                max_wait = 10  # Wait up to 10 seconds
+                waited = 0
+                while waited < max_wait and not self.lobby_socket:
+                    time.sleep(0.1)
+                    waited += 0.1
+                
+                if self.lobby_socket:
+                    # Wait a bit more for the connection to be fully ready
+                    time.sleep(0.5)
+                    logging.info(f"Auto-login as developer: {DEVELOPER_USER['user']}")
+                    send_to_lobby_queue({
+                        "action": "login",
+                        "data": {"user": DEVELOPER_USER["user"], "pass": DEVELOPER_USER["pass"]}
+                    })
+                    self.username = DEVELOPER_USER["user"]
+                else:
+                    logging.warning("Could not establish connection for auto-login")
+            
+            threading.Thread(target=auto_login_thread, daemon=True).start()
+
     def _create_ui_elements(self):
         super()._create_ui_elements()
         self.ui_elements["add_game_btn"] = Button(10, 10, 150, 40, self.fonts["SMALL"], "Add Game")
@@ -76,8 +112,9 @@ class DeveloperGUI(BaseGUI):
         # UI elements for the upload screen
         self.ui_elements["game_name_input"] = TextInput(300, 200, 400, 32, self.fonts["SMALL"])
         self.ui_elements["game_desc_input"] = TextInput(300, 250, 400, 90, self.fonts["TINY"], multiline=True) # Larger height, multiline, smaller font
-        self.ui_elements["game_version_input"] = TextInput(300, 350, 200, 32, self.fonts["SMALL"], "1") # Adjust Y for description field
-        self.ui_elements["select_file_btn"] = Button(300, 400, 200, 40, self.fonts["SMALL"], "Select File") 
+        self.ui_elements["game_version_input"] = TextInput(300, 350, 200, 32, self.fonts["SMALL"], "1.0.0") # Adjust Y for description field
+        # Pre-fill with developer/games/ path (relative from project root)
+        self.ui_elements["file_path_input"] = TextInput(300, 400, 400, 32, self.fonts["SMALL"], "developer/games/") # File path input
         self.ui_elements["upload_btn"] = Button(350, 450, 200, 50, self.fonts["MEDIUM"], "Upload")
         self.error_message_timer = 0
 
@@ -101,9 +138,7 @@ class DeveloperGUI(BaseGUI):
         self.ui_elements["game_name_input"].handle_event(event)
         self.ui_elements["game_desc_input"].handle_event(event)
         self.ui_elements["game_version_input"].handle_event(event)
-        
-        if self.ui_elements["select_file_btn"].handle_event(event):
-            self._select_game_file()
+        self.ui_elements["file_path_input"].handle_event(event)
         
         if self.ui_elements["upload_btn"].handle_event(event):
             self._attempt_upload_game()
@@ -142,12 +177,9 @@ class DeveloperGUI(BaseGUI):
         draw_text(screen, "Version:", 100, 350, self.fonts["SMALL"], (255, 255, 255))
         self.ui_elements["game_version_input"].draw(screen)
         
-        draw_text(screen, "File:", 100, 400, self.fonts["SMALL"], (255, 255, 255))
-        self.ui_elements["select_file_btn"].draw(screen)
-
-        # Show selected file name
-        selected_file_text = self.ui_elements.get("selected_file_name", "No file selected")
-        draw_text(screen, selected_file_text, 520, 410, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, "File Path:", 100, 400, self.fonts["SMALL"], (255, 255, 255))
+        self.ui_elements["file_path_input"].draw(screen)
+        draw_text(screen, "(pre-filled with developer/games/ - just add filename, e.g., tetris.py)", 100, 435, self.fonts["TINY"], (150, 150, 150))
         
         self.ui_elements["upload_btn"].draw(screen)
 
@@ -159,23 +191,39 @@ class DeveloperGUI(BaseGUI):
             else:
                 draw_text(screen, self.error_message, 300, 520, self.fonts["MEDIUM"], (255, 50, 50))
 
-    def _select_game_file(self):
-        """Opens a file dialog to select a game file."""
-        import tkinter as tk
-        from tkinter import filedialog
+    def _resolve_file_path(self, file_path_str: str) -> str | None:
+        """
+        Resolves a file path string to an absolute path.
+        Handles:
+        - Absolute paths (e.g., /home/user/game.py)
+        - Relative paths from project root (e.g., developer/games/tetris.py)
+        - Filenames only (assumes developer/games/ folder)
+        Returns None if file doesn't exist.
+        """
+        if not file_path_str or not file_path_str.strip():
+            return None
         
-        root = tk.Tk()
-        root.withdraw() # Hide the main window
-        file_path = filedialog.askopenfilename(
-            title="Select Game File",
-            initialdir="developer/games", # Start in the local games folder
-            filetypes=[("Python files", "*.py"), ("All files", "*.*")]
-        )
-        root.destroy()
+        file_path_str = file_path_str.strip()
         
-        if file_path:
-            self.ui_elements["selected_file_path"] = file_path
-            self.ui_elements["selected_file_name"] = os.path.basename(file_path)
+        # If it's already an absolute path, use it directly
+        if os.path.isabs(file_path_str):
+            if os.path.exists(file_path_str):
+                return file_path_str
+            return None
+        
+        # Try as relative path from project root
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        relative_path = os.path.join(project_root, file_path_str)
+        if os.path.exists(relative_path):
+            return relative_path
+        
+        # Try as filename in developer/games/ folder
+        developer_games_path = os.path.join(project_root, "developer", "games", file_path_str)
+        if os.path.exists(developer_games_path):
+            return developer_games_path
+        
+        # File not found
+        return None
             
     def _attempt_upload_game(self):
         """Prepares and sends the upload_game request."""
@@ -183,18 +231,29 @@ class DeveloperGUI(BaseGUI):
         
         name = self.ui_elements["game_name_input"].text
         version = self.ui_elements["game_version_input"].text
-        file_path = self.ui_elements.get("selected_file_path")
+        file_path_str = self.ui_elements["file_path_input"].text
         
-        if not all([name, version, file_path]):
-            self.error_message = "Missing fields"
-            self.error_message_timer = time.time() + 1 # Show for 1 second
+        if not name or not version or not file_path_str:
+            self.error_message = "Missing fields (name, version, or file path)"
+            self.error_message_timer = time.time() + 2
+            return
+        
+        # Resolve the file path
+        file_path = self._resolve_file_path(file_path_str)
+        if not file_path:
+            self.error_message = f"File not found: {file_path_str}"
+            self.error_message_timer = time.time() + 3
             return
             
         try:
+            # Read the file
             with open(file_path, 'rb') as f:
                 file_data = f.read()
+            
+            # Encode to base64
             file_data_b64 = base64.b64encode(file_data).decode('utf-8')
             
+            # Send upload request
             send_to_lobby_queue({
                 "action": "upload_game",
                 "data": {
@@ -204,10 +263,16 @@ class DeveloperGUI(BaseGUI):
                     "file_data": file_data_b64
                 }
             })
+            
             # Go back to the dev menu after attempting upload
             with self.state_lock:
                 self.client_state = "MY_GAMES_MENU"
                 self.success_message = "Upload request sent..." # Optimistic feedback
+                # Clear the form (but keep the default path prefix)
+                self.ui_elements["game_name_input"].text = ""
+                self.ui_elements["game_desc_input"].text = ""
+                self.ui_elements["game_version_input"].text = "1.0.0"
+                self.ui_elements["file_path_input"].text = "developer/games/"
                 # Refresh the games list
                 send_to_lobby_queue({"action": "list_my_games"})
 
@@ -220,21 +285,28 @@ class DeveloperGUI(BaseGUI):
         with self.state_lock:
             if current_state == "UPLOAD_GAME":
                 self.client_state = "MY_GAMES_MENU"
-                # Clear fields
+                # Clear fields (but keep the default path prefix)
                 self.ui_elements["game_name_input"].text = ""
                 self.ui_elements["game_desc_input"].text = ""
                 self.ui_elements["game_version_input"].text = "1.0.0"
-                self.ui_elements["selected_file_path"] = None
-                self.ui_elements["selected_file_name"] = "No file selected"
-                # Clear any error/success messages
+                self.ui_elements["file_path_input"].text = "developer/games/"
                 self.error_message = None
                 self.success_message = None
             else:
-                # Default behavior for MY_GAMES_MENU or other states
+                # Default behavior for MY_GAMES_MENU or other states - logout
                 self.client_state = "LOGIN"
                 self.username = None
                 self.error_message = None
                 self.is_developer = False # Also reset developer status
 if __name__ == "__main__":
-    client = DeveloperGUI()
+    parser = argparse.ArgumentParser(description="Developer Client")
+    parser.add_argument('-c', '--client', type=int, choices=[1], default=None,
+                       help='Auto-login as developer (use -c 1)')
+    args = parser.parse_args()
+    
+    auto_login = args.client == 1
+    if auto_login:
+        logging.info("Auto-login enabled for developer")
+    
+    client = DeveloperGUI(auto_login=auto_login)
     client.run()

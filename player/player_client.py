@@ -4,6 +4,9 @@ import sys
 import os
 import logging
 import base64
+import argparse
+import time
+import threading
 
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14,14 +17,50 @@ if project_root not in sys.path:
 from gui.base_gui import BaseGUI, draw_text, Button, TextInput
 from client.shared import send_to_lobby_queue
 
+# Predefined users for auto-login
+PLAYER_USERS = {
+    1: {"user": "player1", "pass": "player1"},
+    2: {"user": "player2", "pass": "player2"},
+    3: {"user": "player3", "pass": "player3"}
+}
+
 class PlayerGUI(BaseGUI):
-    def __init__(self):
+    def __init__(self, auto_login_user=None):
         super().__init__(title="Player Client")
         self.all_games = [] # Games available in the store
         self.my_games = []  # Games downloaded by the player
         self.game_rooms = [] # Available rooms in the lobby
         self.download_buttons = {}  # Maps game_id to Button object
         self.create_room_buttons = {}  # Maps game_id to Button object
+        self.auto_login_user = auto_login_user  # User credentials for auto-login
+        self.auto_login_sent = False  # Track if auto-login has been sent
+
+    def _start_network_thread(self):
+        super()._start_network_thread()
+        
+        # If auto-login is enabled, wait for connection and send login
+        if self.auto_login_user:
+            def auto_login_thread():
+                # Wait for connection to be established
+                max_wait = 10  # Wait up to 10 seconds
+                waited = 0
+                while waited < max_wait and not self.lobby_socket:
+                    time.sleep(0.1)
+                    waited += 0.1
+                
+                if self.lobby_socket:
+                    # Wait a bit more for the connection to be fully ready
+                    time.sleep(0.5)
+                    logging.info(f"Auto-login as {self.auto_login_user['user']}")
+                    send_to_lobby_queue({
+                        "action": "login",
+                        "data": {"user": self.auto_login_user["user"], "pass": self.auto_login_user["pass"]}
+                    })
+                    self.username = self.auto_login_user["user"]
+                else:
+                    logging.warning("Could not establish connection for auto-login")
+            
+            threading.Thread(target=auto_login_thread, daemon=True).start()
 
     def _create_ui_elements(self):
         super()._create_ui_elements()
@@ -300,5 +339,18 @@ class PlayerGUI(BaseGUI):
 
 
 if __name__ == "__main__":
-    client = PlayerGUI()
+    parser = argparse.ArgumentParser(description="Player Client")
+    parser.add_argument('-c', '--client', type=int, choices=[1, 2, 3], 
+                       help='Auto-login as player 1, 2, or 3')
+    args = parser.parse_args()
+    
+    auto_login = None
+    if args.client:
+        if args.client in PLAYER_USERS:
+            auto_login = PLAYER_USERS[args.client]
+            logging.info(f"Auto-login enabled for player {args.client}: {auto_login['user']}")
+        else:
+            logging.warning(f"Invalid client number: {args.client}")
+    
+    client = PlayerGUI(auto_login_user=auto_login)
     client.run()
