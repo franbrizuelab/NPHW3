@@ -4,7 +4,7 @@ Multi-game platform with developer tools.
 
 ## Setup
 
-**Requirements:** pyenv installed
+**Requirements:** Python 3.11+ (system-wide) OR pyenv installed
 
 **Linux/macOS:**
 ```bash
@@ -19,9 +19,16 @@ venv\Scripts\activate.bat
 ```
 
 This will:
-1. Install Python 3.11.0 via pyenv
-2. Create virtual environment (`venv/`)
+1. Use system Python 3.11+ if available (fast), otherwise install via pyenv (only if not already installed)
+2. Create virtual environment (`venv/`) (skips if already exists)
 3. Install packages from `requirements.txt`
+
+**Performance:** 
+- **First run:** If using pyenv, Python installation may take 10-20 minutes (one-time)
+- **Subsequent runs:** Script detects existing Python/venv and skips installation (seconds)
+- **Fast path:** If you have Python 3.11+ system-wide, the script will use it automatically (no pyenv needed)
+
+**Storage:** This project uses JSON file storage (no SQLite database required). Data files are automatically created in the `storage/` directory.
 
 ## Running
 

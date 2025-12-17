@@ -1,5 +1,8 @@
 # Network Programming HW3 - Python Dependencies
 # Install with: pip install -r requirements.txt
+#
+# Note: This project uses JSON file storage (no SQLite database required)
+# Storage files are created in the storage/ directory automatically
 
 # Password hashing
 bcrypt>=4.0.0
