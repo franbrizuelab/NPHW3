@@ -19,7 +19,7 @@ from gui.base_gui import BASE_CONFIG
 from client.shared import send_to_lobby_queue
 
 # Predefined developer user for auto-login
-DEVELOPER_USER = {"user": "dev", "pass": "dev123"}
+DEVELOPER_USER = {"user": "de", "pass": "de"}
 
 class DeveloperGUI(BaseGUI):
     def __init__(self, auto_login=False):
@@ -381,18 +381,36 @@ class DeveloperGUI(BaseGUI):
         for i, game in enumerate(self.my_games):
             y_pos = 200 + i * 50
             game_id = game.get('id')
-            draw_text(screen, str(game_id), 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
-            draw_text(screen, game.get('name'), 150, y_pos, self.fonts["SMALL"], (255, 255, 255))
-            draw_text(screen, game.get('current_version'), 450, y_pos, self.fonts["SMALL"], (255, 255, 255))
-
-            # Create and store buttons
-            if game_id not in self.update_buttons:
-                self.update_buttons[game_id] = Button(580, y_pos - 5, 100, 30, self.fonts["TINY"], "Update")
-            if game_id not in self.delete_buttons:
-                self.delete_buttons[game_id] = Button(690, y_pos - 5, 100, 30, self.fonts["TINY"], "Delete")
+            is_deleted = game.get('deleted', 0) == 1
             
-            self.update_buttons[game_id].draw(screen)
-            self.delete_buttons[game_id].draw(screen)
+            # Draw ID
+            draw_text(screen, str(game_id), 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
+            
+            # Draw name - if deleted, add "(DELETED)" indicator
+            game_name = game.get('name', 'Unknown')
+            if is_deleted:
+                game_name += " (DELETED)"
+                name_color = (150, 150, 150)  # Grayed out for deleted games
+            else:
+                name_color = (255, 255, 255)
+            draw_text(screen, game_name, 150, y_pos, self.fonts["SMALL"], name_color)
+            
+            # Draw version - only for non-deleted games
+            if not is_deleted:
+                version = game.get('current_version', 'unknown')
+                draw_text(screen, version, 450, y_pos, self.fonts["SMALL"], (255, 255, 255))
+            # Deleted games: no version shown (leave blank or show nothing)
+
+            # Create and store buttons (only for non-deleted games)
+            if not is_deleted:
+                if game_id not in self.update_buttons:
+                    self.update_buttons[game_id] = Button(580, y_pos - 5, 100, 30, self.fonts["TINY"], "Update")
+                if game_id not in self.delete_buttons:
+                    self.delete_buttons[game_id] = Button(690, y_pos - 5, 100, 30, self.fonts["TINY"], "Delete")
+                
+                self.update_buttons[game_id].draw(screen)
+                self.delete_buttons[game_id].draw(screen)
+            # Deleted games: no buttons (they're already deleted)
 
     def draw_upload_game_screen(self, screen):
         draw_text(screen, "Upload New Game", 300, 100, self.fonts["TITLE"], (255, 255, 255))

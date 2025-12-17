@@ -239,7 +239,8 @@ def process_request(request_data: dict) -> dict:
                 author = data.get('author')
                 if not author:
                     return {"status": "error", "reason": "missing_author"}
-                games = db_ops.get_games_by_author(author)
+                include_deleted = data.get('include_deleted', False)
+                games = db_ops.get_games_by_author(author, include_deleted=include_deleted)
                 return {"status": "ok", "games": games}
             
             elif action == "search":

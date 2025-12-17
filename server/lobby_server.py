@@ -1054,11 +1054,11 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                         send_to_client(client_sock, {"status": "error", "reason": f"remove_failed: {str(e)}"})
                 
                 elif action == 'list_my_games':
-                    # Get games by author
+                    # Get games by author (include deleted games for developers to see)
                     db_request = {
                         "collection": "Game",
                         "action": "list_by_author",
-                        "data": {"author": username}
+                        "data": {"author": username, "include_deleted": True}
                     }
                     db_response = forward_to_db(db_request)
                     if db_response and db_response.get("status") == "ok":

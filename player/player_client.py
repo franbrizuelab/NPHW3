@@ -46,6 +46,10 @@ class PlayerGUI(BaseGUI):
         self.last_version_check = 0
         self.downloaded_versions = {}  # Maps game_id to {"version": str, "downloaded_at": float}
         
+        # Deleted games check (separate from version check, but can be combined)
+        self.deleted_check_interval = 5  # seconds - check more frequently for deleted games
+        self.last_deleted_check = 0
+        
         # Room creation state
         self.room_is_public = True  # Default to public rooms
         self.online_users = []  # List of online users for invitations
@@ -184,6 +188,13 @@ class PlayerGUI(BaseGUI):
             self.draw_version_conflict_popup(screen)
 
     def handle_custom_events(self, event, state):
+        # Periodic check for deleted games (works in any logged-in state)
+        if self.username and state != "LOGIN" and state != "CONNECTING":
+            current_time = time.time()
+            if current_time - self.last_deleted_check > self.deleted_check_interval:
+                send_to_lobby_queue({"action": "list_games"})
+                self.last_deleted_check = current_time
+        
         if state == "LOBBY_MENU":
             if self.ui_elements["store_btn"].handle_event(event):
                 self.client_state = "STORE_MENU"
@@ -205,11 +216,16 @@ class PlayerGUI(BaseGUI):
                     })
                     logging.info(f"Requested download for game {game_id}")
         elif state == "MY_GAMES_MENU":
-            # Periodic version checking
+            # Periodic version checking and deleted games check
             current_time = time.time()
             if current_time - self.last_version_check > self.version_check_interval:
                 send_to_lobby_queue({"action": "list_games"})
                 self.last_version_check = current_time
+            
+            # Also check for deleted games more frequently
+            if current_time - self.last_deleted_check > self.deleted_check_interval:
+                send_to_lobby_queue({"action": "list_games"})
+                self.last_deleted_check = current_time
             
             # Handle create room button clicks
             for game_id, btn in self.create_room_buttons.items():
@@ -367,8 +383,13 @@ class PlayerGUI(BaseGUI):
             self._compare_versions(games)
             self.all_games = games
             
-            # Check for deleted games - remove from my_games and delete files
+            # ALWAYS check for deleted games - remove from my_games and delete files
+            # This ensures deleted games are removed even if player wasn't connected when deletion happened
+            deleted_count_before = len(self.my_games)
             self._cleanup_deleted_games(games)
+            deleted_count_after = len(self.my_games)
+            if deleted_count_before > deleted_count_after:
+                logging.info(f"Removed {deleted_count_before - deleted_count_after} deleted game(s) from local storage")
             
             self._update_download_buttons()
             # Force UI update by ensuring state is correct
@@ -748,15 +769,15 @@ class PlayerGUI(BaseGUI):
                 self.my_games.append(game_data)
         
         # Also include any downloaded games not in server list (orphaned)
-        for game_name, file_path in downloaded_files.items():
-            if not any(g.get("name") == game_name for g in self.my_games):
-                self.my_games.append({
-                    "id": None,
-                    "name": game_name,
-                    "current_version": "unknown",
-                    "description": "Downloaded game (not in server list)",
-                    "author": "unknown"
-                })
+        # for game_name, file_path in downloaded_files.items():
+        #     if not any(g.get("name") == game_name for g in self.my_games):
+        #         self.my_games.append({
+        #             "id": None,
+        #             "name": game_name,
+        #             "current_version": "unknown",
+        #             "description": "Downloaded game (not in server list)",
+        #             "author": "unknown"
+        #         })
         
         # Update create room buttons
         self._update_create_room_buttons()
@@ -1183,7 +1204,7 @@ class PlayerGUI(BaseGUI):
         overlay.fill((0, 0, 0))
         screen.blit(overlay, (0, 0))
         
-        # Popup box
+        # Popup boxa
         popup_rect = pygame.Rect(200, 250, 500, 250)
         pygame.draw.rect(screen, (40, 40, 50), popup_rect, 0, border_radius=10)
         pygame.draw.rect(screen, (255, 200, 0), popup_rect, 2, border_radius=10)
@@ -1193,11 +1214,11 @@ class PlayerGUI(BaseGUI):
         server_version = self.version_conflict_popup.get("server_version", "unknown")
         local_version = self.version_conflict_popup.get("local_version", "not downloaded")
         
-        draw_text(screen, "Version Outdated", 450, 280, self.fonts["MEDIUM"], (255, 200, 0))
-        draw_text(screen, f"Game: {game_name}", 450, 310, self.fonts["SMALL"], (255, 255, 255))
-        draw_text(screen, f"Your version: {local_version}", 450, 330, self.fonts["TINY"], (200, 200, 200))
-        draw_text(screen, f"Server version: {server_version}", 450, 350, self.fonts["TINY"], (200, 200, 200))
-        draw_text(screen, "Please download the latest version", 450, 370, self.fonts["TINY"], (255, 255, 255))
+        draw_text(screen, "Version Outdated", 250, 280, self.fonts["MEDIUM"], (255, 200, 0))
+        draw_text(screen, f"Game: {game_name}", 250, 310, self.fonts["SMALL"], (255, 255, 255))
+        draw_text(screen, f"Your version: {local_version}", 250, 330, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, f"Server version: {server_version}", 250, 350, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, "Please download the latest version", 250, 370, self.fonts["TINY"], (255, 255, 255))
         
         # Draw buttons
         if self.version_download_btn:
