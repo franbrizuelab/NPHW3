@@ -333,7 +333,7 @@ def handle_create_room(client_sock: socket.socket, username: str, data: dict):
             send_to_client(client_sock, {"status": "error", "reason": "already_in_a_room"})
             return
     
-    # 2. If game_id provided, fetch game name from DB
+    # 2. If game_id provided, fetch game name from DB and check if deleted
     game_name = None
     if game_id:
         db_request = {
@@ -344,6 +344,11 @@ def handle_create_room(client_sock: socket.socket, username: str, data: dict):
         db_response = forward_to_db(db_request)
         if db_response and db_response.get("status") == "ok":
             game = db_response.get("game", {})
+            # Check if game is deleted
+            if game.get("deleted", 0) == 1:
+                send_to_client(client_sock, {"status": "error", "reason": "game_deleted"})
+                logging.warning(f"User {username} tried to create room with deleted game {game_id}")
+                return
             game_name = game.get("name")
         else:
             logging.warning(f"Game {game_id} not found, creating room without game name")
@@ -745,10 +750,12 @@ def handle_invite(client_sock: socket.socket, inviter_username: str, data: dict)
             return
         
         # Get room info for invite message
+        game_id = None
         with g_room_lock:
             room = g_rooms.get(room_id)
             if room:
                 game_name = room.get("game_name")
+                game_id = room.get("game_id")
             
         # 2. Find target user and check their status
         target_session = g_client_sessions.get(target_username)
@@ -778,7 +785,8 @@ def handle_invite(client_sock: socket.socket, inviter_username: str, data: dict)
             "type": "INVITE_RECEIVED",
             "from_user": inviter_username,
             "room_id": room_id,
-            "game_name": game_name
+            "game_id": game_id,
+            "game_name": game_name or "Unknown Game"
         }
         send_to_client(target_sock, invite_msg)
         send_to_client(client_sock, {"status": "ok", "reason": "invite_sent"})
@@ -1024,6 +1032,21 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                         response = handle_remove_game(client_sock, username, data, DB_HOST, DB_PORT)
                         if response.get("status") == "ok":
                             send_to_client(client_sock, {"status": "ok", "reason": "game_removed"})
+                            
+                            # Notify all connected player clients that a game was deleted
+                            game_id = data.get("game_id")
+                            deleted_game_msg = {
+                                "type": "GAME_DELETED",
+                                "game_id": game_id
+                            }
+                            with g_session_lock:
+                                for session_username, session in g_client_sessions.items():
+                                    # Only notify non-developer clients (players)
+                                    if session_username != username:  # Don't notify the developer who deleted it
+                                        try:
+                                            send_to_client(session["sock"], deleted_game_msg)
+                                        except Exception as e:
+                                            logging.warning(f"Failed to notify {session_username} of game deletion: {e}")
                         else:
                             send_to_client(client_sock, response)
                     except Exception as e:

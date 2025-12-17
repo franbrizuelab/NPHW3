@@ -63,6 +63,11 @@ class PlayerGUI(BaseGUI):
         self.invite_accept_btn = None
         self.invite_decline_btn = None
         
+        # Version conflict popup state
+        self.version_conflict_popup = None  # Stores: {"game_id": int, "game_name": str, "server_version": str, "local_version": str}
+        self.version_download_btn = None
+        self.version_cancel_btn = None
+        
         # Game connection state
         self.game_socket = None
         self.game_send_queue = queue.Queue()
@@ -171,9 +176,12 @@ class PlayerGUI(BaseGUI):
         elif state == "GAME":
             self.draw_game_screen(screen)
         
-        # Draw invitation popup if there's a pending invite (draws on top of everything)
+        # Draw popups (invitation and version conflict) - draw on top of everything
         if self.pending_invite:
             self.draw_invite_popup(screen)
+        
+        if self.version_conflict_popup:
+            self.draw_version_conflict_popup(screen)
 
     def handle_custom_events(self, event, state):
         if state == "LOBBY_MENU":
@@ -206,25 +214,31 @@ class PlayerGUI(BaseGUI):
             # Handle create room button clicks
             for game_id, btn in self.create_room_buttons.items():
                 if btn.handle_event(event):
-                    # Create room immediately and go to waiting screen
-                    self.current_room_game_id = game_id
-                    # Clear previous room state
-                    self.current_room_id = None
-                    self.current_room_data = {}
-                    self.online_users = []
-                    if hasattr(self, 'invite_buttons'):
-                        self.invite_buttons = {}
-                    send_to_lobby_queue({
-                        "action": "create_room",
-                        "data": {
-                            "game_id": game_id,
-                            "is_public": self.room_is_public,
-                            "name": f"{self.username}'s {self._get_game_name(game_id)} Room"
-                        }
-                    })
-                    # Request online users list for invitations (will be requested again when ROOM_UPDATE is received)
-                    send_to_lobby_queue({"action": "list_users"})
-                    logging.info(f"Creating room for game {game_id}, going to waiting screen")
+                    # Check version before creating room
+                    if self._is_version_outdated(game_id):
+                        # Show version conflict popup
+                        self._show_version_conflict_popup(game_id)
+                        logging.info(f"Version outdated for game {game_id}, showing popup")
+                    else:
+                        # Version is up to date, proceed with room creation
+                        self.current_room_game_id = game_id
+                        # Clear previous room state
+                        self.current_room_id = None
+                        self.current_room_data = {}
+                        self.online_users = []
+                        if hasattr(self, 'invite_buttons'):
+                            self.invite_buttons = {}
+                        send_to_lobby_queue({
+                            "action": "create_room",
+                            "data": {
+                                "game_id": game_id,
+                                "is_public": self.room_is_public,
+                                "name": f"{self.username}'s {self._get_game_name(game_id)} Room"
+                            }
+                        })
+                        # Request online users list for invitations (will be requested again when ROOM_UPDATE is received)
+                        send_to_lobby_queue({"action": "list_users"})
+                        logging.info(f"Creating room for game {game_id}, going to waiting screen")
             
             # Handle private/public toggle button clicks
             for game_id, toggle_btn in self.room_toggle_buttons.items():
@@ -284,18 +298,48 @@ class PlayerGUI(BaseGUI):
         # Handle invitation popup (works in any state)
         if self.pending_invite:
             if self.invite_accept_btn and self.invite_accept_btn.handle_event(event):
-                # Accept invitation - join the room
+                # Accept invitation - check version first
                 room_id = self.pending_invite['room_id']
-                self.pending_invite = None  # Close popup
-                send_to_lobby_queue({
-                    "action": "join_room",
-                    "data": {"room_id": room_id}
-                })
-                logging.info(f"Accepted invitation to room {room_id}")
+                # Get game_id from room data or invitation
+                game_id = self.pending_invite.get('game_id')
+                if game_id is None:
+                    # Try to get from current_room_data if available
+                    if self.current_room_data:
+                        game_id = self.current_room_data.get('game_id')
+                
+                if game_id and self._is_version_outdated(game_id):
+                    # Show version conflict popup (don't close invite popup yet)
+                    self._show_version_conflict_popup(game_id)
+                    logging.info(f"Version outdated for game {game_id} when accepting invite")
+                else:
+                    # Version is OK, proceed with join
+                    self.pending_invite = None  # Close popup
+                    send_to_lobby_queue({
+                        "action": "join_room",
+                        "data": {"room_id": room_id}
+                    })
+                    logging.info(f"Accepted invitation to room {room_id}")
             elif self.invite_decline_btn and self.invite_decline_btn.handle_event(event):
                 # Decline invitation
                 self.pending_invite = None  # Close popup
                 logging.info("Declined invitation")
+        
+        # Handle version conflict popup (works in any state)
+        if self.version_conflict_popup:
+            if self.version_download_btn and self.version_download_btn.handle_event(event):
+                # Download the latest version
+                game_id = self.version_conflict_popup.get("game_id")
+                if game_id:
+                    send_to_lobby_queue({
+                        "action": "download_game",
+                        "data": {"game_id": game_id}
+                    })
+                    logging.info(f"Downloading latest version of game {game_id}")
+                self._hide_version_conflict_popup()
+            elif self.version_cancel_btn and self.version_cancel_btn.handle_event(event):
+                # Cancel - close popup
+                self._hide_version_conflict_popup()
+                logging.info("Cancelled version conflict popup")
 
     def handle_network_message(self, msg):
         """Handles player-specific network messages."""
@@ -322,6 +366,10 @@ class PlayerGUI(BaseGUI):
             # Compare versions and mark updates
             self._compare_versions(games)
             self.all_games = games
+            
+            # Check for deleted games - remove from my_games and delete files
+            self._cleanup_deleted_games(games)
+            
             self._update_download_buttons()
             # Force UI update by ensuring state is correct
             with self.state_lock:
@@ -384,17 +432,73 @@ class PlayerGUI(BaseGUI):
         
         elif msg.get("type") == "INVITE_RECEIVED":
             # Received an invitation
+            # Get game_id from room data if available
+            room_id = msg.get("room_id")
+            game_id = None
+            # Try to get game_id from current room data or from rooms list
+            if room_id:
+                for room in self.game_rooms:
+                    if room.get("id") == room_id:
+                        game_id = room.get("game_id")
+                        break
+            
             self.pending_invite = {
                 "from_user": msg.get("from_user"),
-                "room_id": msg.get("room_id"),
+                "room_id": room_id,
+                "game_id": game_id,
                 "game_name": msg.get("game_name", "Unknown Game")
             }
-            logging.info(f"Received invitation from {self.pending_invite['from_user']} for room {self.pending_invite['room_id']}")
+            logging.info(f"Received invitation from {self.pending_invite['from_user']} for room {room_id}")
             # Create buttons if they don't exist
             if not self.invite_accept_btn:
                 self.invite_accept_btn = Button(300, 350, 140, 40, self.fonts["SMALL"], "Accept")
             if not self.invite_decline_btn:
                 self.invite_decline_btn = Button(460, 350, 140, 40, self.fonts["SMALL"], "Decline")
+        
+        elif msg.get("type") == "GAME_DELETED":
+            # A game was deleted by a developer - refresh game list and cleanup
+            deleted_game_id = msg.get("game_id")
+            logging.info(f"Game {deleted_game_id} was deleted, refreshing game list and cleaning up")
+            
+            # Request updated game list
+            send_to_lobby_queue({"action": "list_games"})
+            
+            # Immediately cleanup the deleted game from local storage
+            if deleted_game_id and self.username:
+                # Remove from my_games
+                self.my_games = [g for g in self.my_games if g.get("id") != deleted_game_id]
+                
+                # Remove from downloaded_versions
+                if deleted_game_id in self.downloaded_versions:
+                    del self.downloaded_versions[deleted_game_id]
+                
+                # Delete game file
+                game_name = None
+                for game in self.all_games:
+                    if game.get("id") == deleted_game_id:
+                        game_name = game.get("name")
+                        break
+                
+                if not game_name:
+                    # Try to find from my_games before removal
+                    for game in list(self.my_games) + list(self.all_games):
+                        if game.get("id") == deleted_game_id:
+                            game_name = game.get("name")
+                            break
+                
+                if game_name:
+                    user_download_dir = os.path.join("player", "downloads", self.username)
+                    game_file_path = os.path.join(user_download_dir, f"{game_name}.py")
+                    if os.path.exists(game_file_path):
+                        try:
+                            os.remove(game_file_path)
+                            logging.info(f"Deleted game file: {game_file_path}")
+                        except Exception as e:
+                            logging.error(f"Failed to delete game file {game_file_path}: {e}")
+                
+                # Update UI
+                self._update_create_room_buttons()
+                self._update_download_buttons()
         
         elif msg.get("type") == "GAME_OVER":
             # Game ended - return to lobby
@@ -551,9 +655,19 @@ class PlayerGUI(BaseGUI):
             
             logging.info(f"Downloaded game '{game_name}' to {file_path}")
             
+            # Store version info
+            self.downloaded_versions[game_id] = {
+                "version": version,
+                "downloaded_at": time.time()
+            }
+            
             # Rescan downloaded games
             self.scan_downloaded_games()
             self._update_download_buttons()
+            
+            # If version conflict popup was showing for this game, hide it
+            if self.version_conflict_popup and self.version_conflict_popup.get("game_id") == game_id:
+                self._hide_version_conflict_popup()
             
         except Exception as e:
             logging.error(f"Error handling game download: {e}")
@@ -671,6 +785,8 @@ class PlayerGUI(BaseGUI):
     
     def _compare_versions(self, games):
         """Compare server versions with local versions and mark updates."""
+        if not games:
+            return
         for game in games:
             game_id = game.get("id")
             if game_id in self.downloaded_versions:
@@ -689,6 +805,104 @@ class PlayerGUI(BaseGUI):
             if game.get("id") == game_id:
                 return game.get("name", f"Game {game_id}")
         return f"Game {game_id}"
+    
+    def _get_server_version(self, game_id):
+        """Get the server's current version for a game."""
+        for game in self.all_games:
+            if game.get("id") == game_id:
+                return game.get("current_version")
+        return None
+    
+    def _get_local_version(self, game_id):
+        """Get the locally downloaded version for a game."""
+        if game_id in self.downloaded_versions:
+            return self.downloaded_versions[game_id].get("version")
+        return None
+    
+    def _is_version_outdated(self, game_id):
+        """Check if the local version is outdated compared to server version."""
+        server_version = self._get_server_version(game_id)
+        local_version = self._get_local_version(game_id)
+        
+        # If game not downloaded, it's considered outdated
+        if local_version is None:
+            return True
+        
+        # If server version doesn't exist, can't compare (shouldn't happen)
+        if server_version is None:
+            return False
+        
+        # Simple string comparison (dev handles versioning format)
+        return local_version != server_version
+    
+    def _show_version_conflict_popup(self, game_id, game_name=None):
+        """Show version conflict popup with download option."""
+        if game_name is None:
+            game_name = self._get_game_name(game_id)
+        
+        server_version = self._get_server_version(game_id)
+        local_version = self._get_local_version(game_id)
+        
+        self.version_conflict_popup = {
+            "game_id": game_id,
+            "game_name": game_name,
+            "server_version": server_version or "unknown",
+            "local_version": local_version or "not downloaded"
+        }
+        
+        # Create popup buttons
+        self.version_download_btn = Button(300, 400, 150, 40, self.fonts["SMALL"], "Download")
+        self.version_cancel_btn = Button(470, 400, 150, 40, self.fonts["SMALL"], "Cancel")
+        
+        logging.info(f"Version conflict: game_id={game_id}, local={local_version}, server={server_version}")
+    
+    def _hide_version_conflict_popup(self):
+        """Hide version conflict popup."""
+        self.version_conflict_popup = None
+        self.version_download_btn = None
+        self.version_cancel_btn = None
+    
+    def _cleanup_deleted_games(self, server_games):
+        """Remove deleted games from my_games and delete their files."""
+        if not self.username:
+            return
+        
+        # Get list of game IDs from server (active games only)
+        server_game_ids = {game.get("id") for game in server_games if game.get("id")}
+        
+        # Find games in my_games that are not in server list (deleted)
+        games_to_remove = []
+        for game in self.my_games:
+            game_id = game.get("id")
+            if game_id and game_id not in server_game_ids:
+                games_to_remove.append(game)
+        
+        # Remove deleted games from my_games and delete files
+        user_download_dir = os.path.join("player", "downloads", self.username)
+        for game in games_to_remove:
+            game_id = game.get("id")
+            game_name = game.get("name", f"game_{game_id}")
+            
+            # Remove from my_games
+            self.my_games.remove(game)
+            
+            # Remove from downloaded_versions
+            if game_id in self.downloaded_versions:
+                del self.downloaded_versions[game_id]
+            
+            # Delete game file
+            game_file_path = os.path.join(user_download_dir, f"{game_name}.py")
+            if os.path.exists(game_file_path):
+                try:
+                    os.remove(game_file_path)
+                    logging.info(f"Deleted game file for removed game: {game_file_path}")
+                except Exception as e:
+                    logging.error(f"Failed to delete game file {game_file_path}: {e}")
+            
+            logging.info(f"Removed deleted game {game_name} (id: {game_id}) from downloads")
+        
+        # Update create room buttons after cleanup
+        self._update_create_room_buttons()
     
     def _update_create_room_buttons(self):
         """Update create room buttons for downloaded games."""
@@ -957,6 +1171,39 @@ class PlayerGUI(BaseGUI):
             self.invite_accept_btn.draw(screen)
         if self.invite_decline_btn:
             self.invite_decline_btn.draw(screen)
+    
+    def draw_version_conflict_popup(self, screen):
+        """Draw version conflict popup overlay."""
+        if not self.version_conflict_popup:
+            return
+        
+        # Semi-transparent overlay
+        overlay = pygame.Surface((BASE_CONFIG["SCREEN"]["WIDTH"], BASE_CONFIG["SCREEN"]["HEIGHT"]))
+        overlay.set_alpha(200)
+        overlay.fill((0, 0, 0))
+        screen.blit(overlay, (0, 0))
+        
+        # Popup box
+        popup_rect = pygame.Rect(200, 250, 500, 250)
+        pygame.draw.rect(screen, (40, 40, 50), popup_rect, 0, border_radius=10)
+        pygame.draw.rect(screen, (255, 200, 0), popup_rect, 2, border_radius=10)
+        
+        # Text
+        game_name = self.version_conflict_popup.get("game_name", "Unknown Game")
+        server_version = self.version_conflict_popup.get("server_version", "unknown")
+        local_version = self.version_conflict_popup.get("local_version", "not downloaded")
+        
+        draw_text(screen, "Version Outdated", 450, 280, self.fonts["MEDIUM"], (255, 200, 0))
+        draw_text(screen, f"Game: {game_name}", 450, 310, self.fonts["SMALL"], (255, 255, 255))
+        draw_text(screen, f"Your version: {local_version}", 450, 330, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, f"Server version: {server_version}", 450, 350, self.fonts["TINY"], (200, 200, 200))
+        draw_text(screen, "Please download the latest version", 450, 370, self.fonts["TINY"], (255, 255, 255))
+        
+        # Draw buttons
+        if self.version_download_btn:
+            self.version_download_btn.draw(screen)
+        if self.version_cancel_btn:
+            self.version_cancel_btn.draw(screen)
 
     def _game_network_thread(self, sock):
         """Handles game network communication."""

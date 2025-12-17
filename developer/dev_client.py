@@ -70,9 +70,47 @@ class DeveloperGUI(BaseGUI):
                 self.client_state = "MY_GAMES_MENU"
                 # Clear the form
                 self.ui_elements["game_name_input"].text = ""
+                self.ui_elements["game_name_input"]._update_surface()
                 self.ui_elements["game_desc_input"].text = ""
+                self.ui_elements["game_desc_input"]._update_surface()
                 self.ui_elements["game_version_input"].text = "1"
+                self.ui_elements["game_version_input"]._update_surface()
                 self.ui_elements["file_path_input"].text = "developer/games/"
+                self.ui_elements["file_path_input"]._update_surface()
+                self.update_game_id = None
+            # Refresh games list
+            send_to_lobby_queue({"action": "list_my_games"})
+        
+        elif status == "ok" and reason == "game_updated":
+            # Game update successful
+            game_id = msg.get('game_id')
+            version = msg.get('version')
+            logging.info(f"Game updated successfully: game_id={game_id}, version={version}")
+            # Show success message and go back to games menu
+            with self.state_lock:
+                self.success_message = f"Game updated! ID: {game_id}, Version: {version}"
+                self.error_message = None
+                self.client_state = "MY_GAMES_MENU"
+                # Clear the form
+                self.ui_elements["game_name_input"].text = ""
+                self.ui_elements["game_name_input"]._update_surface()
+                self.ui_elements["game_desc_input"].text = ""
+                self.ui_elements["game_desc_input"]._update_surface()
+                self.ui_elements["game_version_input"].text = "1"
+                self.ui_elements["game_version_input"]._update_surface()
+                self.ui_elements["file_path_input"].text = "developer/games/"
+                self.ui_elements["file_path_input"]._update_surface()
+                self.update_game_id = None
+            # Refresh games list
+            send_to_lobby_queue({"action": "list_my_games"})
+        
+        elif status == "ok" and reason == "game_removed":
+            # Game deletion successful
+            logging.info("Game removed successfully")
+            # Show success message
+            with self.state_lock:
+                self.success_message = "Game deleted successfully"
+                self.error_message = None
             # Refresh games list
             send_to_lobby_queue({"action": "list_my_games"})
         
@@ -181,6 +219,12 @@ class DeveloperGUI(BaseGUI):
             "upload_btn"
         ]
         self.error_message_timer = 0
+        self.success_message_timer = None  # Initialize timer for success messages
+        
+        # Update/Delete buttons for My Games menu
+        self.update_buttons = {}  # Maps game_id to Button
+        self.delete_buttons = {}  # Maps game_id to Button
+        self.update_game_id = None  # Track which game is being updated
 
     def draw_custom_state(self, screen, state):
         # Draw username in upper center for all states
@@ -194,6 +238,8 @@ class DeveloperGUI(BaseGUI):
             self.draw_my_games_menu(screen)
         elif state == "UPLOAD_GAME":
             self.draw_upload_game_screen(screen)
+        elif state == "UPDATE_GAME":
+            self.draw_update_game_screen(screen)
 
     def handle_custom_events(self, event, state):
         if state == "MY_GAMES_MENU":
@@ -209,10 +255,62 @@ class DeveloperGUI(BaseGUI):
                         self.ui_elements[name].active = False
                         self.ui_elements[name].color = BASE_CONFIG["COLORS"]["INPUT_BOX"]
                     self.ui_elements["upload_btn"].is_focused = False
-            # Handle update/delete buttons here in the future
+            
+            # Handle update/delete button clicks
+            for game_id, update_btn in self.update_buttons.items():
+                if update_btn.handle_event(event):
+                    # Find the game data
+                    game_data = None
+                    for game in self.my_games:
+                        if game.get('id') == game_id:
+                            game_data = game
+                            break
+                    
+                    if game_data:
+                        self.update_game_id = game_id
+                        # Pre-fill form with game data - ensure all fields are properly filled
+                        with self.state_lock:
+                            self.client_state = "UPDATE_GAME"
+                            # Pre-fill name (required field)
+                            self.ui_elements["game_name_input"].text = game_data.get('name') or ''
+                            self.ui_elements["game_name_input"]._update_surface()  # Update display
+                            # Pre-fill description (may be None or empty)
+                            desc = game_data.get('description')
+                            self.ui_elements["game_desc_input"].text = desc if desc else ''
+                            self.ui_elements["game_desc_input"]._update_surface()  # Update display
+                            # Pre-fill version (required field, default to '1' if missing)
+                            version = game_data.get('current_version')
+                            self.ui_elements["game_version_input"].text = version if version else '1'
+                            self.ui_elements["game_version_input"]._update_surface()  # Update display
+                            # Pre-fill file path with default
+                            self.ui_elements["file_path_input"].text = "developer/games/"
+                            self.ui_elements["file_path_input"]._update_surface()  # Update display
+                            # Clear any previous error/success messages
+                            self.error_message = None
+                            self.success_message = None
+                            self.success_message_timer = None
+                            # Initialize focus
+                            self.upload_focused_element_idx = 0
+                            self.ui_elements["game_name_input"].active = True
+                            self.ui_elements["game_name_input"].color = BASE_CONFIG["COLORS"]["INPUT_ACTIVE"]
+                            for name in ["game_desc_input", "game_version_input", "file_path_input"]:
+                                self.ui_elements[name].active = False
+                                self.ui_elements[name].color = BASE_CONFIG["COLORS"]["INPUT_BOX"]
+                            self.ui_elements["upload_btn"].is_focused = False
+            
+            for game_id, delete_btn in self.delete_buttons.items():
+                if delete_btn.handle_event(event):
+                    # Send delete request
+                    send_to_lobby_queue({
+                        "action": "remove_game",
+                        "data": {"game_id": game_id}
+                    })
+                    logging.info(f"Requesting deletion of game {game_id}")
         
         elif state == "UPLOAD_GAME":
             self.handle_upload_game_events(event)
+        elif state == "UPDATE_GAME":
+            self.handle_upload_game_events(event)  # Reuse same event handler
 
     def handle_upload_game_events(self, event):
         if event.type == pygame.KEYDOWN:
@@ -276,21 +374,36 @@ class DeveloperGUI(BaseGUI):
         draw_text(screen, "Name", 150, 150, self.fonts["TINY"], (200, 200, 200))
         draw_text(screen, "Version", 450, 150, self.fonts["TINY"], (200, 200, 200))
 
+        # Rebuild buttons dictionary
+        self.update_buttons = {}
+        self.delete_buttons = {}
+        
         for i, game in enumerate(self.my_games):
             y_pos = 200 + i * 50
-            draw_text(screen, str(game.get('id')), 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
+            game_id = game.get('id')
+            draw_text(screen, str(game_id), 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
             draw_text(screen, game.get('name'), 150, y_pos, self.fonts["SMALL"], (255, 255, 255))
             draw_text(screen, game.get('current_version'), 450, y_pos, self.fonts["SMALL"], (255, 255, 255))
 
-            # Placeholder buttons (adjusted width and position)
-            update_btn = Button(580, y_pos - 5, 100, 30, self.fonts["TINY"], "Update")
-            delete_btn = Button(690, y_pos - 5, 100, 30, self.fonts["TINY"], "Delete")
-            update_btn.draw(screen)
-            delete_btn.draw(screen)
+            # Create and store buttons
+            if game_id not in self.update_buttons:
+                self.update_buttons[game_id] = Button(580, y_pos - 5, 100, 30, self.fonts["TINY"], "Update")
+            if game_id not in self.delete_buttons:
+                self.delete_buttons[game_id] = Button(690, y_pos - 5, 100, 30, self.fonts["TINY"], "Delete")
+            
+            self.update_buttons[game_id].draw(screen)
+            self.delete_buttons[game_id].draw(screen)
 
     def draw_upload_game_screen(self, screen):
         draw_text(screen, "Upload New Game", 300, 100, self.fonts["TITLE"], (255, 255, 255))
-        
+        self._draw_game_form(screen)
+    
+    def draw_update_game_screen(self, screen):
+        draw_text(screen, "Update Game", 300, 100, self.fonts["TITLE"], (255, 255, 255))
+        self._draw_game_form(screen)
+    
+    def _draw_game_form(self, screen):
+        """Shared form drawing for both upload and update screens."""
         # Draw labels and input boxes
         draw_text(screen, "Name:", 100, 200, self.fonts["SMALL"], (255, 255, 255))
         self.ui_elements["game_name_input"].draw(screen)
@@ -326,8 +439,8 @@ class DeveloperGUI(BaseGUI):
             draw_text(screen, error_text, 50, 520, self.fonts["SMALL"], (255, 50, 50))
         
         # Show success message if present (with auto-clear after 3 seconds)
-        if hasattr(self, 'success_message') and self.success_message:
-            if not hasattr(self, 'success_message_timer'):
+        if self.success_message:
+            if self.success_message_timer is None:
                 self.success_message_timer = time.time() + 3
             if time.time() < self.success_message_timer:
                 draw_text(screen, self.success_message, 300, 500, self.fonts["SMALL"], (50, 255, 50))
@@ -353,7 +466,7 @@ class DeveloperGUI(BaseGUI):
         if os.path.isabs(file_path_str):
             if os.path.exists(file_path_str):
                 return file_path_str
-            return Noneo
+            return None
         
         # Try as relative path from project root
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -370,7 +483,7 @@ class DeveloperGUI(BaseGUI):
         return None
             
     def _attempt_upload_game(self):
-        """Prepares and sends the upload_game request."""
+        """Prepares and sends the upload_game or update_game request."""
         import base64
         
         name = self.ui_elements["game_name_input"].text
@@ -397,19 +510,30 @@ class DeveloperGUI(BaseGUI):
             # Encode to base64
             file_data_b64 = base64.b64encode(file_data).decode('utf-8')
             
-            # Send upload request
+            # Determine if this is an update or new upload
+            is_update = (self.update_game_id is not None)
+            action = "update_game" if is_update else "upload_game"
+            
+            # Get description (may be empty string)
+            description = self.ui_elements["game_desc_input"].text.strip() if self.ui_elements["game_desc_input"].text else ""
+            
+            request_data = {
+                "name": name.strip(),  # Ensure name is trimmed
+                "description": description,  # Description can be empty
+                "version": version.strip(),  # Ensure version is trimmed
+                "file_data": file_data_b64
+            }
+            
+            if is_update:
+                request_data["game_id"] = self.update_game_id
+            
+            # Send request
             send_to_lobby_queue({
-                "action": "upload_game",
-                "data": {
-                    "name": name,
-                    "description": self.ui_elements["game_desc_input"].text,
-                    "version": version,
-                    "file_data": file_data_b64
-                }
+                "action": action,
+                "data": request_data
             })
             
-            # Stay on upload screen - wait for server response
-            # Don't change state yet - let handle_network_message handle the response
+            # Stay on screen - wait for server response
             # Clear error message
             with self.state_lock:
                 self.error_message = None
@@ -422,15 +546,20 @@ class DeveloperGUI(BaseGUI):
     def handle_back_button(self, current_state):
         """Custom back button behavior for the developer client."""
         with self.state_lock:
-            if current_state == "UPLOAD_GAME":
+            if current_state in ["UPLOAD_GAME", "UPDATE_GAME"]:
                 self.client_state = "MY_GAMES_MENU"
                 # Clear fields (but keep the default path prefix)
                 self.ui_elements["game_name_input"].text = ""
+                self.ui_elements["game_name_input"]._update_surface()
                 self.ui_elements["game_desc_input"].text = ""
-                self.ui_elements["game_version_input"].text = "1" # Only one number is simpler to keep track of and debug
+                self.ui_elements["game_desc_input"]._update_surface()
+                self.ui_elements["game_version_input"].text = "1"
+                self.ui_elements["game_version_input"]._update_surface()
                 self.ui_elements["file_path_input"].text = "developer/games/"
+                self.ui_elements["file_path_input"]._update_surface()
                 self.error_message = None
                 self.success_message = None
+                self.update_game_id = None
             else:
                 # Default behavior for MY_GAMES_MENU or other states - logout
                 self.client_state = "LOGIN"

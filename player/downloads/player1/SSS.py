@@ -337,13 +337,17 @@ class SnakeGame:
                         grid[y][x] = PARAMETERS["SNAKE_P2_CHAR"]
         
         # Print grid with spacing for square appearance
-        # Simple printing: each character followed by a space
-        # Grid has 'width' columns, each becomes "char " (2 chars), so total width is width*2
-        border_line = PARAMETERS["BORDER_CHAR"] * (width * 2)
+        # Use double-width spacing: each cell becomes "char " (char + space)
+        border_line = PARAMETERS["BORDER_CHAR"] * (width * 2 + 1)  # +1 for border chars
         print("\n" + border_line)
         for row in grid:
-            # Print each character with a space after it
-            row_str = "".join(char + " " for char in row)
+            # Print each character with a space after it (except borders which are doubled)
+            row_str = ""
+            for char in row:
+                if char == PARAMETERS["BORDER_CHAR"]:
+                    row_str += char * 2  # Double-width borders
+                else:
+                    row_str += char + " "  # Regular cells: char + space
             print(row_str)
         print(border_line)
         
@@ -619,13 +623,19 @@ def run_game_client(game_host: str, game_port: int, room_id: int = None):
             # Clear screen and print
             print("\033[2J\033[H")  # Clear screen and move cursor to top
             
-            # Simple printing: each character followed by a space for square appearance
-            # Grid has 'width' columns, each becomes "char " (2 chars), so total width is width*2
-            border_line = PARAMETERS["BORDER_CHAR"] * (width * 2)
+            # Print with spacing to make it more square (terminal chars are taller than wide)
+            # Use double-width spacing: each cell becomes "char " (char + space)
+            # This makes the grid appear more square since terminal characters are ~2:1 (height:width)
+            border_line = PARAMETERS["BORDER_CHAR"] * (width * 2 + 1)  # +1 for border chars
             print(border_line)
             for row in grid:
-                # Print each character with a space after it
-                row_str = "".join(char + " " for char in row)
+                # Print each character with a space after it (except borders which are doubled)
+                row_str = ""
+                for char in row:
+                    if char == PARAMETERS["BORDER_CHAR"]:
+                        row_str += char * 2  # Double-width borders
+                    else:
+                        row_str += char + " "  # Regular cells: char + space
                 print(row_str)
             print(border_line)
             

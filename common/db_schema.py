@@ -57,11 +57,20 @@ def create_tables(conn: sqlite3.Connection):
             author TEXT NOT NULL,
             description TEXT,
             current_version TEXT,
+            deleted BOOLEAN DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (author) REFERENCES users(username)
         )
     """)
+    
+    # Migrate existing games table to add deleted column if it doesn't exist
+    try:
+        cursor.execute("ALTER TABLE games ADD COLUMN deleted BOOLEAN DEFAULT 0")
+        logger.info("Added 'deleted' column to games table")
+    except sqlite3.OperationalError:
+        # Column already exists, ignore
+        pass
     
     # Game Versions table
     cursor.execute("""

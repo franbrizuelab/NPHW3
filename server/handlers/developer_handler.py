@@ -205,31 +205,40 @@ def handle_upload_game(client_sock: socket.socket, username: str, data: dict,
 
 def handle_update_game(client_sock: socket.socket, username: str, data: dict,
                       db_host: str, db_port: int) -> dict:
-    """Handle game update (add new version)."""
+    """Handle game update (add new version and update metadata)."""
     # Check developer status
     if not check_developer(username, db_host, db_port):
         return {"status": "error", "reason": "not_developer"}
     
     game_id = data.get('game_id')
     version = data.get('version')
+    name = data.get('name')  # Game name can be updated
     file_data_str = data.get('file_data')  # Mode 1: base64
     file_name = data.get('file_name')  # Mode 2: from developer/games/
-    description = data.get('description')
+    description = data.get('description', '')  # Description can be empty
     
     if not game_id or not version:
         return {"status": "error", "reason": "missing_game_id_or_version"}
     
+    if not name:
+        return {"status": "error", "reason": "missing_game_name"}
+    
     if not file_data_str and not file_name:
-        # Update metadata only
+        # Update metadata only (no new file)
         db_request = {
             "collection": "Game",
             "action": "update",
             "data": {
                 "game_id": game_id,
-                "description": description
+                "name": name,
+                "description": description,
+                "current_version": version
             }
         }
         db_response = forward_to_db(db_request, db_host, db_port)
+        if db_response and db_response.get("status") == "ok":
+            logger.info(f"User {username} updated game {game_id} metadata (no new file)")
+            return {"status": "ok", "game_id": game_id, "version": version}
         return db_response if db_response else {"status": "error", "reason": "db_error"}
     
     # Verify user owns this game
@@ -287,19 +296,24 @@ def handle_update_game(client_sock: socket.socket, username: str, data: dict,
     if not db_version_response or db_version_response.get("status") != "ok":
         return {"status": "error", "reason": "failed_to_create_version"}
     
-    # Update game's current_version
+    # Update game's metadata (name, description, current_version) - completely replace previous values
     db_update_request = {
         "collection": "Game",
         "action": "update",
         "data": {
             "game_id": game_id,
-            "current_version": version,
-            "description": description
+            "name": name,  # Update name
+            "description": description,  # Update description (can be empty string)
+            "current_version": version  # Update version
         }
     }
-    forward_to_db(db_update_request, db_host, db_port)
+    db_update_response = forward_to_db(db_update_request, db_host, db_port)
     
-    logger.info(f"User {username} updated game {game_id} to version {version}")
+    if not db_update_response or db_update_response.get("status") != "ok":
+        logger.error(f"Failed to update game metadata for game {game_id}")
+        return {"status": "error", "reason": "failed_to_update_metadata"}
+    
+    logger.info(f"User {username} updated game {game_id} to version {version} (name: {name})")
     return {"status": "ok", "game_id": game_id, "version": version}
 
 def handle_remove_game(client_sock: socket.socket, username: str, data: dict,
@@ -328,17 +342,8 @@ def handle_remove_game(client_sock: socket.socket, username: str, data: dict,
     if game.get("author") != username:
         return {"status": "error", "reason": "not_game_owner"}
     
-    # Delete game files
-    game_dir = os.path.join("storage/games", str(game_id))
-    if os.path.exists(game_dir):
-        import shutil
-        try:
-            shutil.rmtree(game_dir)
-            logger.info(f"Deleted game files for game {game_id}")
-        except Exception as e:
-            logger.error(f"Error deleting game files: {e}")
-    
-    # Delete from database
+    # Soft delete: Mark game as deleted in database (keep files and records)
+    # Game files are kept for potential restoration or record-keeping
     db_request = {
         "collection": "Game",
         "action": "delete",
@@ -347,7 +352,7 @@ def handle_remove_game(client_sock: socket.socket, username: str, data: dict,
     db_response = forward_to_db(db_request, db_host, db_port)
     
     if db_response and db_response.get("status") == "ok":
-        logger.info(f"User {username} removed game {game_id}")
+        logger.info(f"User {username} soft-deleted game {game_id} (marked as deleted, files kept)")
         return {"status": "ok"}
     else:
         return {"status": "error", "reason": "failed_to_delete_game"}

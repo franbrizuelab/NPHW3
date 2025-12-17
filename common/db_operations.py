@@ -104,34 +104,38 @@ class DatabaseOperations:
             logger.error(f"Error getting game: {e}")
             return None
     
-    def get_games_by_author(self, author: str) -> List[Dict[str, Any]]:
-        """Get all games by an author."""
+    def get_games_by_author(self, author: str, include_deleted: bool = False) -> List[Dict[str, Any]]:
+        """Get all games by an author. Optionally include deleted games."""
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT * FROM games WHERE author = ? ORDER BY updated_at DESC", (author,))
+            if include_deleted:
+                cursor.execute("SELECT * FROM games WHERE author = ? ORDER BY updated_at DESC", (author,))
+            else:
+                cursor.execute("SELECT * FROM games WHERE author = ? AND (deleted = 0 OR deleted IS NULL) ORDER BY updated_at DESC", (author,))
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Error getting games by author: {e}")
             return []
     
     def list_all_games(self) -> List[Dict[str, Any]]:
-        """List all games."""
+        """List all games (excluding deleted ones)."""
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT * FROM games ORDER BY updated_at DESC")
+            cursor.execute("SELECT * FROM games WHERE (deleted = 0 OR deleted IS NULL) ORDER BY updated_at DESC")
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Error listing games: {e}")
             return []
     
     def search_games(self, query: str) -> List[Dict[str, Any]]:
-        """Search games by name or author."""
+        """Search games by name or author (excluding deleted ones)."""
         try:
             cursor = self.conn.cursor()
             search_term = f"%{query}%"
             cursor.execute("""
                 SELECT * FROM games 
-                WHERE name LIKE ? OR author LIKE ? OR description LIKE ?
+                WHERE (deleted = 0 OR deleted IS NULL)
+                AND (name LIKE ? OR author LIKE ? OR description LIKE ?)
                 ORDER BY updated_at DESC
             """, (search_term, search_term, search_term))
             return [dict(row) for row in cursor.fetchall()]
@@ -172,13 +176,11 @@ class DatabaseOperations:
             return False
     
     def delete_game(self, game_id: int) -> bool:
-        """Delete a game and all its versions."""
+        """Soft delete a game (set deleted = 1). Keeps records for future features."""
         try:
             cursor = self.conn.cursor()
-            # Delete versions first (foreign key constraint)
-            cursor.execute("DELETE FROM game_versions WHERE game_id = ?", (game_id,))
-            # Delete game
-            cursor.execute("DELETE FROM games WHERE id = ?", (game_id,))
+            # Soft delete: set deleted flag instead of actual deletion
+            cursor.execute("UPDATE games SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (game_id,))
             self.conn.commit()
             return cursor.rowcount > 0
         except Exception as e:

@@ -616,23 +616,35 @@ def run_game_client(game_host: str, game_port: int, room_id: int = None):
                         else:
                             grid[y][x] = PARAMETERS["SNAKE_P2_CHAR"]
             
-            # Clear screen and print
-            print("\033[2J\033[H")  # Clear screen and move cursor to top
+            # BUILD THE FRAME AS ONE STRING
+            output = []
             
-            # Simple printing: each character followed by a space for square appearance
-            # Grid has 'width' columns, each becomes "char " (2 chars), so total width is width*2
-            border_line = PARAMETERS["BORDER_CHAR"] * (width * 2)
-            print(border_line)
+            # Move cursor to top-left instead of clearing the whole screen
+            # \033[H moves cursor to 1,1; \033[J clears from cursor to end of screen
+            output.append("\033[H") 
+            
+            # Create a consistent border line (matching the "char + space" logic)
+            # Using "##" or "# " makes the top border align with the sides
+            top_bottom_border = PARAMETERS["BORDER_CHAR"] * (width * 2)
+            
+            output.append(top_bottom_border)
             for row in grid:
-                # Print each character with a space after it
-                row_str = "".join(char + " " for char in row)
-                print(row_str)
-            print(border_line)
+                # Join row, but strip the very last trailing space to prevent wrapping bugs
+                row_str = "".join(char + " " for char in row).rstrip()
+                output.append(row_str)
+            output.append(top_bottom_border)
+            
+            # Status info
+            output.append(f"P1: {state.get('snake1', {}).get('length', 0)} | P2: {state.get('snake2', {}).get('length', 0)} | Apples: {len(state.get('apples', []))}")
+            
+            # Print everything at once
+            sys.stdout.write("\n".join(output) + "\n")
+            sys.stdout.flush()
             
             # Print status
-            print(f"P1 Snake: Length {snake1.get('length', 0)}, Alive: {snake1.get('alive', False)}")
-            print(f"P2 Snake: Length {snake2.get('length', 0)}, Alive: {snake2.get('alive', False)}")
-            print(f"Apples: {len(state.get('apples', []))}")
+            # print(f"P1 Snake: Length {snake1.get('length', 0)}, Alive: {snake1.get('alive', False)}")
+            # print(f"P2 Snake: Length {snake2.get('length', 0)}, Alive: {snake2.get('alive', False)}")
+            # print(f"Apples: {len(state.get('apples', []))}")
             if state.get('game_over'):
                 print(f"Game Over! Winner: {state.get('winner', 'Unknown')}")
         
