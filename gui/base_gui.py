@@ -302,13 +302,21 @@ class BaseGUI:
         self.ui_elements["login_btn"].draw(self.screen, blink_on)
         self.ui_elements["reg_btn"].draw(self.screen, blink_on)
         if self.error_message:
-            err_size = self.fonts["MEDIUM"].size(self.error_message)
-            draw_text(self.screen, self.error_message, (BASE_CONFIG["SCREEN"]["WIDTH"] - err_size[0]) // 2, 400, self.fonts["MEDIUM"], BASE_CONFIG["COLORS"]["ERROR"])
+            # Use SMALL font for error messages and truncate if too long
+            error_text = self.error_message
+            if len(error_text) > 60:
+                error_text = error_text[:57] + "..."
+            err_size = self.fonts["SMALL"].size(error_text)
+            draw_text(self.screen, error_text, (BASE_CONFIG["SCREEN"]["WIDTH"] - err_size[0]) // 2, 400, self.fonts["SMALL"], BASE_CONFIG["COLORS"]["ERROR"])
 
     def _draw_error_screen(self):
         draw_text(self.screen, "Error", 350, 100, self.fonts["TITLE"], BASE_CONFIG["COLORS"]["ERROR"])
         if self.error_message:
-            draw_text(self.screen, self.error_message, 150, 200, self.fonts["LARGE"], BASE_CONFIG["COLORS"]["ERROR"])
+            # Use SMALL font and wrap/truncate long messages
+            error_text = self.error_message
+            if len(error_text) > 60:
+                error_text = error_text[:57] + "..."
+            draw_text(self.screen, error_text, 150, 200, self.fonts["SMALL"], BASE_CONFIG["COLORS"]["ERROR"])
 
     def _attempt_login(self):
         user, password = self.ui_elements["user_input"].text, self.ui_elements["pass_input"].text
@@ -388,8 +396,12 @@ class BaseGUI:
             elif status == "ok" and reason == "logout_successful": pass
             elif status == "error":
                 self.error_message = reason
-                if self.client_state not in ["LOGIN", "CONNECTING"]:
-                    self.client_state = "LOGIN"
+                # Don't force logout on errors - let subclasses handle it
+                # Only reset to LOGIN if it's a critical authentication error
+                if reason in ["must_be_logged_in", "session_expired", "invalid_credentials"]:
+                    if self.client_state not in ["LOGIN", "CONNECTING"]:
+                        self.client_state = "LOGIN"
+                        self.username = None
 
     def handle_back_button(self, current_state):
         """Initiates logout by sending a message and then closing the socket."""

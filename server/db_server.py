@@ -123,6 +123,23 @@ def process_request(request_data: dict) -> dict:
                     logging.warning(f"User login failed: {username}")
                     return {"status": "error", "reason": "invalid_credentials"}
             
+            elif action == "get": # Get user info without password (for developer checks, etc.)
+                username = data.get('username')
+                if not username:
+                    return {"status": "error", "reason": "missing_username"}
+                
+                user = db_ops.get_user(username)
+                if user:
+                    return {
+                        "status": "ok",
+                        "user": {
+                            "username": username,
+                            "is_developer": bool(user.get('is_developer', 0))
+                        }
+                    }
+                else:
+                    return {"status": "error", "reason": "user_not_found"}
+            
             elif action == "update": # For setting status
                 username = data.get('username')
                 new_status = data.get('status')

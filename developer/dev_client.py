@@ -6,6 +6,7 @@ import argparse
 import time
 import threading
 import logging
+import pygame
 
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14,6 +15,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
     
 from gui.base_gui import BaseGUI, draw_text, Button, TextInput
+from gui.base_gui import BASE_CONFIG
 from client.shared import send_to_lobby_queue
 
 # Predefined developer user for auto-login
@@ -26,6 +28,8 @@ class DeveloperGUI(BaseGUI):
         self.my_games = []
         self.auto_login = auto_login  # Flag for auto-login
         self.auto_login_sent = False  # Track if auto-login has been sent
+        self.success_message = None  # Success message for upload
+        self.upload_focused_element_idx = 0  # Track focused element on upload screen
 
     # Override methods for developer-specific functionality
     def draw_custom_state(self, screen, state):
@@ -53,6 +57,57 @@ class DeveloperGUI(BaseGUI):
                 else:
                     self.client_state = "ERROR"
                     self.error_message = "User is not a developer"
+        
+        elif status == "ok" and reason == "game_uploaded":
+            # Game upload successful
+            game_id = msg.get('game_id')
+            version = msg.get('version')
+            logging.info(f"Game uploaded successfully: game_id={game_id}, version={version}")
+            # Show success message and go back to games menu
+            with self.state_lock:
+                self.success_message = f"Game uploaded! ID: {game_id}, Version: {version}"
+                self.error_message = None
+                self.client_state = "MY_GAMES_MENU"
+                # Clear the form
+                self.ui_elements["game_name_input"].text = ""
+                self.ui_elements["game_desc_input"].text = ""
+                self.ui_elements["game_version_input"].text = "1"
+                self.ui_elements["file_path_input"].text = "developer/games/"
+            # Refresh games list
+            send_to_lobby_queue({"action": "list_my_games"})
+        
+        elif status == "error":
+            # Handle errors - don't automatically logout unless it's a critical auth error
+            error_reason = reason
+            logging.warning(f"Received error: {error_reason}")
+            
+            if error_reason == "not_developer":
+                # Developer check failed - this shouldn't happen if we're logged in as developer
+                # But handle it gracefully without logging out
+                logging.warning("Received 'not_developer' error - may indicate session issue")
+                with self.state_lock:
+                    # Show error but don't logout - might be a temporary DB issue
+                    self.error_message = f"Developer check failed: {error_reason}. Your session may have expired. Please try again."
+                    # Don't change state - stay in current state
+            elif error_reason in ["must_be_logged_in", "session_expired", "not_logged_in", "already_logged_in"]:
+                # Critical auth errors - need to logout
+                with self.state_lock:
+                    self.error_message = f"Authentication error: {error_reason}"
+                    self.client_state = "LOGIN"
+                    self.username = None
+                    self.is_developer = False
+                    # Close socket to force reconnection
+                    if self.lobby_socket:
+                        try:
+                            self.lobby_socket.close()
+                        except:
+                            pass
+                        self.lobby_socket = None
+            else:
+                # Other errors - show error but don't logout
+                with self.state_lock:
+                    self.error_message = f"Error: {error_reason}"
+                    # Don't change state - stay in current state
         
         elif msg.get("games"):
             self.my_games = msg.get("games", [])
@@ -112,10 +167,19 @@ class DeveloperGUI(BaseGUI):
         # UI elements for the upload screen
         self.ui_elements["game_name_input"] = TextInput(300, 200, 400, 32, self.fonts["SMALL"])
         self.ui_elements["game_desc_input"] = TextInput(300, 250, 400, 90, self.fonts["TINY"], multiline=True) # Larger height, multiline, smaller font
-        self.ui_elements["game_version_input"] = TextInput(300, 350, 200, 32, self.fonts["SMALL"], "1.0.0") # Adjust Y for description field
+        self.ui_elements["game_version_input"] = TextInput(300, 350, 200, 32, self.fonts["SMALL"], "1") # Adjust Y for description field
         # Pre-fill with developer/games/ path (relative from project root)
         self.ui_elements["file_path_input"] = TextInput(300, 400, 400, 32, self.fonts["SMALL"], "developer/games/") # File path input
         self.ui_elements["upload_btn"] = Button(350, 450, 200, 50, self.fonts["MEDIUM"], "Upload")
+        
+        # List of focusable elements on upload screen (in tab order)
+        self.ui_elements["upload_focusable_elements"] = [
+            "game_name_input",
+            "game_desc_input", 
+            "game_version_input",
+            "file_path_input",
+            "upload_btn"
+        ]
         self.error_message_timer = 0
 
     def draw_custom_state(self, screen, state):
@@ -129,19 +193,72 @@ class DeveloperGUI(BaseGUI):
             if self.ui_elements["add_game_btn"].handle_event(event):
                 with self.state_lock:
                     self.client_state = "UPLOAD_GAME"
+                    # Initialize focus on first element when entering upload screen
+                    self.upload_focused_element_idx = 0
+                    self.ui_elements["game_name_input"].active = True
+                    self.ui_elements["game_name_input"].color = BASE_CONFIG["COLORS"]["INPUT_ACTIVE"]
+                    # Deactivate other inputs
+                    for name in ["game_desc_input", "game_version_input", "file_path_input"]:
+                        self.ui_elements[name].active = False
+                        self.ui_elements[name].color = BASE_CONFIG["COLORS"]["INPUT_BOX"]
+                    self.ui_elements["upload_btn"].is_focused = False
             # Handle update/delete buttons here in the future
         
         elif state == "UPLOAD_GAME":
             self.handle_upload_game_events(event)
 
     def handle_upload_game_events(self, event):
-        self.ui_elements["game_name_input"].handle_event(event)
-        self.ui_elements["game_desc_input"].handle_event(event)
-        self.ui_elements["game_version_input"].handle_event(event)
-        self.ui_elements["file_path_input"].handle_event(event)
-        
-        if self.ui_elements["upload_btn"].handle_event(event):
-            self._attempt_upload_game()
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_TAB:
+                # Tab navigation - cycle through focusable elements
+                current_focus_name = self.ui_elements["upload_focusable_elements"][self.upload_focused_element_idx]
+                
+                # Deactivate current element
+                if current_focus_name in ["game_name_input", "game_desc_input", "game_version_input", "file_path_input"]:
+                    self.ui_elements[current_focus_name].active = False
+                    self.ui_elements[current_focus_name].color = BASE_CONFIG["COLORS"]["INPUT_BOX"]
+                elif current_focus_name == "upload_btn":
+                    self.ui_elements[current_focus_name].is_focused = False
+                
+                # Move to next element
+                self.upload_focused_element_idx = (self.upload_focused_element_idx + 1) % len(self.ui_elements["upload_focusable_elements"])
+                new_focus_name = self.ui_elements["upload_focusable_elements"][self.upload_focused_element_idx]
+                
+                # Activate new element
+                if new_focus_name in ["game_name_input", "game_desc_input", "game_version_input", "file_path_input"]:
+                    self.ui_elements[new_focus_name].active = True
+                    self.ui_elements[new_focus_name].color = BASE_CONFIG["COLORS"]["INPUT_ACTIVE"]
+                elif new_focus_name == "upload_btn":
+                    self.ui_elements[new_focus_name].is_focused = True
+            elif event.key == pygame.K_RETURN:
+                # Enter key - trigger upload if button is focused, otherwise submit current input
+                focused_name = self.ui_elements["upload_focusable_elements"][self.upload_focused_element_idx]
+                if focused_name == "upload_btn":
+                    self._attempt_upload_game()
+                else:
+                    # If an input is focused, just let it handle the event normally
+                    for name in ["game_name_input", "game_desc_input", "game_version_input", "file_path_input"]:
+                        if self.ui_elements[name].active:
+                            self.ui_elements[name].handle_event(event)
+            else:
+                # Pass other key events to active input fields
+                for name in ["game_name_input", "game_desc_input", "game_version_input", "file_path_input"]:
+                    self.ui_elements[name].handle_event(event)
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            # Handle mouse clicks - update focus based on what was clicked
+            clicked_input = None
+            for name in ["game_name_input", "game_desc_input", "game_version_input", "file_path_input"]:
+                if self.ui_elements[name].handle_event(event):
+                    clicked_input = name
+                    # Update focused index
+                    if name in self.ui_elements["upload_focusable_elements"]:
+                        self.upload_focused_element_idx = self.ui_elements["upload_focusable_elements"].index(name)
+            
+            # Handle button click
+            if self.ui_elements["upload_btn"].handle_event(event):
+                self._attempt_upload_game()
+                # Update focused index to button
+                self.upload_focused_element_idx = self.ui_elements["upload_focusable_elements"].index("upload_btn")
     
     def draw_my_games_menu(self, screen):
         draw_text(screen, "My Games", 350, 50, self.fonts["TITLE"], (255, 255, 255))
@@ -189,7 +306,27 @@ class DeveloperGUI(BaseGUI):
                 self.error_message = None
                 self.error_message_timer = 0
             else:
-                draw_text(screen, self.error_message, 300, 520, self.fonts["MEDIUM"], (255, 50, 50))
+                # Use SMALL font and wrap long messages
+                error_text = self.error_message
+                if len(error_text) > 60:  # Truncate very long messages
+                    error_text = error_text[:57] + "..."
+                draw_text(screen, error_text, 50, 520, self.fonts["SMALL"], (255, 50, 50))
+        elif self.error_message:
+            # Show error message if no timer (persistent errors) - use SMALL font
+            error_text = self.error_message
+            if len(error_text) > 60:  # Truncate very long messages
+                error_text = error_text[:57] + "..."
+            draw_text(screen, error_text, 50, 520, self.fonts["SMALL"], (255, 50, 50))
+        
+        # Show success message if present (with auto-clear after 3 seconds)
+        if hasattr(self, 'success_message') and self.success_message:
+            if not hasattr(self, 'success_message_timer'):
+                self.success_message_timer = time.time() + 3
+            if time.time() < self.success_message_timer:
+                draw_text(screen, self.success_message, 300, 500, self.fonts["SMALL"], (50, 255, 50))
+            else:
+                self.success_message = None
+                self.success_message_timer = None
 
     def _resolve_file_path(self, file_path_str: str) -> str | None:
         """
@@ -264,17 +401,12 @@ class DeveloperGUI(BaseGUI):
                 }
             })
             
-            # Go back to the dev menu after attempting upload
+            # Stay on upload screen - wait for server response
+            # Don't change state yet - let handle_network_message handle the response
+            # Clear error message
             with self.state_lock:
-                self.client_state = "MY_GAMES_MENU"
-                self.success_message = "Upload request sent..." # Optimistic feedback
-                # Clear the form (but keep the default path prefix)
-                self.ui_elements["game_name_input"].text = ""
-                self.ui_elements["game_desc_input"].text = ""
-                self.ui_elements["game_version_input"].text = "1.0.0"
-                self.ui_elements["file_path_input"].text = "developer/games/"
-                # Refresh the games list
-                send_to_lobby_queue({"action": "list_my_games"})
+                self.error_message = None
+                self.error_message_timer = 0
 
         except Exception as e:
             self.error_message = f"Error: {e}"
@@ -288,7 +420,7 @@ class DeveloperGUI(BaseGUI):
                 # Clear fields (but keep the default path prefix)
                 self.ui_elements["game_name_input"].text = ""
                 self.ui_elements["game_desc_input"].text = ""
-                self.ui_elements["game_version_input"].text = "1.0.0"
+                self.ui_elements["game_version_input"].text = "1" # Only one number is simpler to keep track of and debug
                 self.ui_elements["file_path_input"].text = "developer/games/"
                 self.error_message = None
                 self.success_message = None

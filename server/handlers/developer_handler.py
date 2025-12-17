@@ -44,16 +44,25 @@ def send_to_client(client_sock: socket.socket, response: dict):
 
 def check_developer(username: str, db_host: str, db_port: int) -> bool:
     """Check if user is a developer."""
+    if not username:
+        logger.warning("check_developer called with None or empty username")
+        return False
+    
+    # Use "get" action to query user without password
     db_request = {
         "collection": "User",
-        "action": "query",
+        "action": "get",
         "data": {"username": username}
     }
     db_response = forward_to_db(db_request, db_host, db_port)
     
     if db_response and db_response.get("status") == "ok":
         user = db_response.get("user", {})
-        return user.get("is_developer", False)
+        is_dev = user.get("is_developer", False)
+        logger.info(f"Developer check for {username}: {is_dev}")
+        return is_dev
+    else:
+        logger.warning(f"Failed to check developer status for {username}: {db_response}")
     return False
 
 def calculate_file_hash(file_data: bytes) -> str:

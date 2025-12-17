@@ -835,6 +835,11 @@ def handle_client(client_sock: socket.socket, addr: tuple):
             
             # Actions allowed AFTER login
             else:
+                if action == 'login':
+                    # Already logged in - send error but don't close connection
+                    send_to_client(client_sock, {"status": "error", "reason": "already_logged_in"})
+                    continue
+                
                 if action == 'logout':
                     break # Break the loop, 'finally' will clean up
                 
@@ -880,25 +885,41 @@ def handle_client(client_sock: socket.socket, addr: tuple):
 
                 # Developer actions
                 elif action == 'upload_game':
-                    response = handle_upload_game(client_sock, username, data, DB_HOST, DB_PORT)
-                    if response.get("status") == "ok":
-                        send_to_client(client_sock, {"status": "ok", "reason": "game_uploaded", **response})
+                    if not username:
+                        send_to_client(client_sock, {"status": "error", "reason": "not_logged_in"})
                     else:
-                        send_to_client(client_sock, response)
+                        try:
+                            response = handle_upload_game(client_sock, username, data, DB_HOST, DB_PORT)
+                            if response.get("status") == "ok":
+                                send_to_client(client_sock, {"status": "ok", "reason": "game_uploaded", **response})
+                            else:
+                                send_to_client(client_sock, response)
+                        except Exception as e:
+                            logging.error(f"Exception during upload_game for {username}: {e}", exc_info=True)
+                            send_to_client(client_sock, {"status": "error", "reason": f"upload_failed: {str(e)}"})
+                            # Don't break the loop - continue handling other requests
                 
                 elif action == 'update_game':
-                    response = handle_update_game(client_sock, username, data, DB_HOST, DB_PORT)
-                    if response.get("status") == "ok":
-                        send_to_client(client_sock, {"status": "ok", "reason": "game_updated", **response})
-                    else:
-                        send_to_client(client_sock, response)
+                    try:
+                        response = handle_update_game(client_sock, username, data, DB_HOST, DB_PORT)
+                        if response.get("status") == "ok":
+                            send_to_client(client_sock, {"status": "ok", "reason": "game_updated", **response})
+                        else:
+                            send_to_client(client_sock, response)
+                    except Exception as e:
+                        logging.error(f"Exception during update_game for {username}: {e}", exc_info=True)
+                        send_to_client(client_sock, {"status": "error", "reason": f"update_failed: {str(e)}"})
                 
                 elif action == 'remove_game':
-                    response = handle_remove_game(client_sock, username, data, DB_HOST, DB_PORT)
-                    if response.get("status") == "ok":
-                        send_to_client(client_sock, {"status": "ok", "reason": "game_removed"})
-                    else:
-                        send_to_client(client_sock, response)
+                    try:
+                        response = handle_remove_game(client_sock, username, data, DB_HOST, DB_PORT)
+                        if response.get("status") == "ok":
+                            send_to_client(client_sock, {"status": "ok", "reason": "game_removed"})
+                        else:
+                            send_to_client(client_sock, response)
+                    except Exception as e:
+                        logging.error(f"Exception during remove_game for {username}: {e}", exc_info=True)
+                        send_to_client(client_sock, {"status": "error", "reason": f"remove_failed: {str(e)}"})
                 
                 elif action == 'list_my_games':
                     # Get games by author
@@ -931,15 +952,26 @@ def handle_client(client_sock: socket.socket, addr: tuple):
 
     except Exception as e:
         logging.error(f"Unhandled exception for {addr} (user: {username}): {e}", exc_info=True)
+        # Try to send error response to client before closing
+        try:
+            send_to_client(client_sock, {"status": "error", "reason": "server_error"})
+        except:
+            pass  # Socket might already be closed
         
     finally:
         # Clean-up
         # Ensure user is logged out and socket is closed
         if username:
-            handle_logout(username)
+            try:
+                handle_logout(username)
+            except Exception as e:
+                logging.warning(f"Error during logout cleanup for {username}: {e}")
         else:
             # If they never logged in, just close the socket
-            client_sock.close()
+            try:
+                client_sock.close()
+            except:
+                pass
             
         logging.info(f"Connection closed for {addr} (user: {username})")
 
