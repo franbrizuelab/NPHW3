@@ -16,6 +16,7 @@ storage/*.json
 
 # Game files
 storage/games/
+player/downloads/
 
 # IDE
 .vscode/

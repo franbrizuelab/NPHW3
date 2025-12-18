@@ -245,7 +245,9 @@ class BaseGUI:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT: self.running = False
                 # Handle back button event globally if logged in and not on a connection screen
-                if self.username and current_state not in ["LOGIN", "CONNECTING", "LOGGING_OUT"] and self.ui_elements["back_btn"].handle_event(event):
+                # Don't allow back button on main menu screens (first screen after login)
+                if (self.username and current_state not in ["LOGIN", "CONNECTING", "LOGGING_OUT", "LOBBY_MENU", "MY_GAMES_MENU"] 
+                    and self.ui_elements["back_btn"].handle_event(event)):
                     self.handle_back_button(current_state)
                     continue
                 if current_state == "LOGIN": self._handle_login_events(event)
@@ -264,7 +266,10 @@ class BaseGUI:
             elif current_state == "ERROR":
                 self._draw_error_screen()
             else:
-                self.ui_elements["back_btn"].draw(self.screen)
+                # Don't draw back button on main menu screens (first screen after login)
+                # Player: LOBBY_MENU, Developer: MY_GAMES_MENU
+                if current_state not in ["LOBBY_MENU", "MY_GAMES_MENU"]:
+                    self.ui_elements["back_btn"].draw(self.screen)
                 self.draw_custom_state(self.screen, current_state)
             
             pygame.display.flip()

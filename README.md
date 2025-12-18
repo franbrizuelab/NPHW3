@@ -52,15 +52,17 @@ python server/lobby_server.py
 
 **Then start clients:**
 
-**Client:**
+**Player Client (main player interface):**
 ```bash
-python client/client_gui.py
+python player/player_client.py
 ```
 
-**Developer:**
+**Developer Client:**
 ```bash
 python developer/developer_client.py
 ```
+
+**Note:** There's also a legacy client in `client/client_gui.py` for reference, but the main player interface is `player/player_client.py`.
 
 **Create test users:**
 ```bash
@@ -81,10 +83,47 @@ python server/set_developer.py <username>
 
 ```
 NPHW3/
-├── server/          # Server components
-├── client/          # Client GUI
-├── developer/       # Developer client
-├── common/          # Shared code
-├── venv/            # Virtual environment (created by setup)
-└── requirements.txt # Python packages
+├── server/              # Server components
+│   ├── db_server.py    # Database server (JSON file storage)
+│   ├── lobby_server.py # Lobby server
+│   ├── game_server.py  # Game server
+│   ├── set_developer.py # Helper script to set user as developer
+│   └── handlers/       # Request handlers
+│       ├── auth_handler.py
+│       ├── developer_handler.py
+│       └── game_handler.py
+├── client/              # Legacy client GUI (older implementation)
+│   ├── client_gui.py
+│   ├── records_screen.py
+│   ├── store_screen.py
+│   └── shared.py
+├── player/              # Player client (main player interface)
+│   ├── player_client.py
+│   └── downloads/       # Player-downloaded games (per-user folders)
+├── developer/           # Developer client
+│   ├── dev_client.py
+│   └── games/          # Developer's local games
+├── gui/                 # Shared GUI base classes
+│   └── base_gui.py
+├── common/              # Shared code
+│   ├── config.py       # Configuration
+│   ├── db_operations.py # Database operations (JSON storage)
+│   ├── db_schema.py    # Database schema initialization
+│   ├── protocol.py     # Network protocol
+│   ├── password_utils.py
+│   └── game_rules.py
+├── assets/              # Assets (fonts, etc.)
+│   └── fonts/
+├── storage/             # JSON data files (created at runtime)
+│   ├── users.json
+│   ├── games.json
+│   ├── game_versions.json
+│   └── game_logs.json
+├── venv/                # Virtual environment (created by setup)
+├── create_test_users.py # Script to create test users
+├── reset_sessions.py    # Helper script
+├── setup.sh             # Setup script (Linux/macOS)
+├── setup.bat            # Setup script (Windows)
+├── requirements.txt     # Python dependencies
+└── README.md
 ```
