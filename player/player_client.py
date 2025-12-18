@@ -60,7 +60,6 @@ class PlayerGUI(BaseGUI):
         # Room state
         self.current_room_id = None  # Current room ID if in a room
         self.current_room_data = {}  # Current room data (players, host, etc.)
-        self.room_join_buttons = {}  # Maps room_id to join button
         
         # Invitation popup state
         self.pending_invite = None  # Stores invite data: {"from_user": str, "room_id": int, "game_name": str}
@@ -216,6 +215,11 @@ class PlayerGUI(BaseGUI):
                     })
                     logging.info(f"Requested download for game {game_id}")
         elif state == "MY_GAMES_MENU":
+            # Handle back button for MY_GAMES_MENU (player client only)
+            if self.ui_elements["back_btn"].handle_event(event):
+                self.handle_back_button(state)
+                return
+            
             # Periodic version checking and deleted games check
             current_time = time.time()
             if current_time - self.last_version_check > self.version_check_interval:
@@ -951,12 +955,9 @@ class PlayerGUI(BaseGUI):
             draw_text(screen, "Room Name", 50, 150, self.fonts["TINY"], (200, 200, 200))
             draw_text(screen, "Game", 300, 150, self.fonts["TINY"], (200, 200, 200))
             draw_text(screen, "Players", 500, 150, self.fonts["TINY"], (200, 200, 200))
-            draw_text(screen, "Action", 650, 150, self.fonts["TINY"], (200, 200, 200))
             
-            self.room_join_buttons = {}
             for i, room in enumerate(self.game_rooms):
                 y_pos = 180 + i * 40
-                room_id = room.get("id")
                 room_name = room.get("name", "Unknown")
                 game_name = room.get("game_name", "Unknown")
                 players_count = room.get("players", 0)
@@ -966,12 +967,6 @@ class PlayerGUI(BaseGUI):
                     draw_text(screen, room_name, 50, y_pos, self.fonts["SMALL"], (255, 255, 255))
                     draw_text(screen, game_name, 300, y_pos, self.fonts["SMALL"], (255, 255, 255))
                     draw_text(screen, f"{players_count}/2", 500, y_pos, self.fonts["SMALL"], (255, 255, 255))
-                    
-                    # Join button
-                    if room_id not in self.room_join_buttons:
-                        self.room_join_buttons[room_id] = Button(650, y_pos - 5, 100, 30, self.fonts["SMALL"], "Join")
-                    btn = self.room_join_buttons[room_id]
-                    btn.draw(screen)
         
     def _draw_game_table(self, screen, games, title, show_download_btn=False, show_create_room_btn=False):
         """Helper to draw a table of games."""
@@ -1054,6 +1049,8 @@ class PlayerGUI(BaseGUI):
         
     def draw_my_games_menu(self, screen):
         logging.debug(f"draw_my_games_menu: my_games has {len(self.my_games)} games")
+        # Draw back button for player client (not shown in base_gui for MY_GAMES_MENU)
+        self.ui_elements["back_btn"].draw(screen)
         self._draw_game_table(screen, self.my_games, "My Games", show_create_room_btn=True)
     
     def draw_room_waiting_screen(self, screen):

@@ -246,10 +246,16 @@ class BaseGUI:
                 if event.type == pygame.QUIT: self.running = False
                 # Handle back button event globally if logged in and not on a connection screen
                 # Don't allow back button on main menu screens (first screen after login)
-                if (self.username and current_state not in ["LOGIN", "CONNECTING", "LOGGING_OUT", "LOBBY_MENU", "MY_GAMES_MENU"] 
+                # MY_GAMES_MENU back button handling is done by child classes for player client
+                if (self.username and current_state not in ["LOGIN", "CONNECTING", "LOGGING_OUT", "LOBBY_MENU"] 
                     and self.ui_elements["back_btn"].handle_event(event)):
-                    self.handle_back_button(current_state)
-                    continue
+                    # Allow child classes to handle MY_GAMES_MENU back button
+                    if current_state == "MY_GAMES_MENU":
+                        # Let child class handle it in handle_custom_events
+                        pass  # Event will continue to handle_custom_events
+                    else:
+                        self.handle_back_button(current_state)
+                        continue  # Skip further processing
                 if current_state == "LOGIN": self._handle_login_events(event)
                 else: self.handle_custom_events(event, current_state)
             
@@ -267,9 +273,15 @@ class BaseGUI:
                 self._draw_error_screen()
             else:
                 # Don't draw back button on main menu screens (first screen after login)
-                # Player: LOBBY_MENU, Developer: MY_GAMES_MENU
-                if current_state not in ["LOBBY_MENU", "MY_GAMES_MENU"]:
-                    self.ui_elements["back_btn"].draw(self.screen)
+                # Player: LOBBY_MENU (MY_GAMES_MENU can have back button), Developer: MY_GAMES_MENU
+                if current_state not in ["LOBBY_MENU"]:
+                    # Check if we're in MY_GAMES_MENU - only allow back button for player client
+                    # This will be handled by child classes if needed
+                    if current_state == "MY_GAMES_MENU":
+                        # Child classes can override draw_custom_state to show back button if needed
+                        pass
+                    else:
+                        self.ui_elements["back_btn"].draw(self.screen)
                 self.draw_custom_state(self.screen, current_state)
             
             pygame.display.flip()
